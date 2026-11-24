@@ -97,6 +97,24 @@ class _BookshelfPageState extends ConsumerState<BookshelfPage> {
               ),
             ],
           ),
+          MediaQuery.sizeOf(context).width >= 600
+              ? Tooltip(
+                  message: '检查更新',
+                  child: TextButton.icon(
+                    onPressed: state.isCheckingUpdates
+                        ? null
+                        : controller.checkUpdates,
+                    icon: const Icon(Icons.sync, size: 18),
+                    label: const Text('检查更新'),
+                  ),
+                )
+              : IconButton(
+                  tooltip: '检查更新',
+                  onPressed: state.isCheckingUpdates
+                      ? null
+                      : controller.checkUpdates,
+                  icon: const Icon(Icons.sync),
+                ),
           Padding(
             padding: const EdgeInsets.only(right: 8),
             child: MediaQuery.sizeOf(context).width >= 520
@@ -119,15 +137,20 @@ class _BookshelfPageState extends ConsumerState<BookshelfPage> {
       ),
       body: Column(
         children: [
+          if (state.isCheckingUpdates)
+            const LinearProgressIndicator(minHeight: 2),
           if (state.isImporting)
             _ImportProgressBar(
               done: state.importDoneCount,
               total: state.importTotalCount,
             ),
-          if (state.errorMessage != null || state.importStatusMessage != null)
+          if (state.errorMessage != null ||
+              state.importStatusMessage != null ||
+              state.updateStatusMessage != null)
             _StatusBanner(
               errorMessage: state.errorMessage,
-              statusMessage: state.importStatusMessage,
+              statusMessage:
+                  state.updateStatusMessage ?? state.importStatusMessage,
               onDismiss: controller.clearBanner,
             ),
           Expanded(
@@ -760,7 +783,11 @@ class _BookCoverArt extends StatelessWidget {
                   ),
                 ),
                 Text(
-                  book.author.isEmpty ? '本地导入' : book.author,
+                  book.author.isEmpty
+                      ? (book.providerType == ProviderType.localTxt
+                            ? '本地导入'
+                            : '在线书籍')
+                      : book.author,
                   maxLines: 1,
                   overflow: TextOverflow.ellipsis,
                   style: const TextStyle(color: Colors.white70, fontSize: 11),

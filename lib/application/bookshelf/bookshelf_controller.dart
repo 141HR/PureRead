@@ -1,10 +1,12 @@
 import 'dart:async';
+import 'dart:math' as math;
 
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:path/path.dart' as p;
 
 import '../../domain/domain.dart';
 import '../core_providers.dart';
+import '../m2_providers.dart';
 import 'bookshelf_state.dart';
 
 const String _kViewModeSettingKey = 'bookshelf_view_mode';
@@ -225,6 +227,7 @@ class BookshelfController extends Notifier<BookshelfState> {
       importDoneCount: 0,
       importTotalCount: filePaths.length,
       clearImportStatus: true,
+      clearUpdateStatus: true,
       clearError: true,
     );
 
@@ -273,10 +276,220 @@ class BookshelfController extends Notifier<BookshelfState> {
     );
   }
 
-  /// Dismisses active import success or error banners.
+  /// Checks all online books on the shelf for newly published chapters using
+  /// bounded concurrency, persisting newly discovered chapters and unread counts
+  /// while skipping missing or broken sources gracefully.
+  Future<void> checkUpdates({int maxConcurrency = 4}) async {
+    if (!_isAlive || state.isCheckingUpdates) return;
+    final bookRepo = ref.read(bookRepositoryProvider);
+    final sourceRepo = ref.read(sourceRepositoryProvider);
+    final providerFactory = ref.read(bookProviderFactoryProvider);
+
+    state = state.copyWith(
+      isCheckingUpdates: true,
+      clearImportStatus: true,
+      clearUpdateStatus: true,
+      clearError: true,
+    );
+
+    final List<Book> onlineBooks;
+    try {
+      final allBooks = await bookRepo.listBooks();
+      if (!_isAlive) return;
+      onlineBooks = allBooks
+          .where(
+            (b) =>
+                b.providerType == ProviderType.jsPlugin ||
+                b.providerType == ProviderType.legado,
+          )
+          .toList(growable: false);
+    } catch (error) {
+      if (!_isAlive) return;
+      state = state.copyWith(
+        isCheckingUpdates: false,
+        errorMessage: '加载书架书籍失败：${_formatError(error)}',
+      );
+      return;
+    }
+
+    if (onlineBooks.isEmpty) {
+      state = state.copyWith(
+        isCheckingUpdates: false,
+        updateStatusMessage: '书架暂无在线书籍',
+      );
+      return;
+    }
+
+    var nextIdx = 0;
+    var updatedBooksCount = 0;
+    var totalNewChapters = 0;
+    var skippedCount = 0;
+
+    Future<void> worker() async {
+      while (true) {
+        if (!_isAlive || nextIdx >= onlineBooks.length) return;
+        final book = onlineBooks[nextIdx++];
+        try {
+          final sourceId = book.sourceId?.trim() ?? '';
+          if (sourceId.isEmpty) {
+            skippedCount++;
+            continue;
+          }
+          final source = await sourceRepo.getSourceById(sourceId);
+          if (!_isAlive) return;
+          if (source == null) {
+            skippedCount++;
+            continue;
+          }
+
+          final provider = await providerFactory.createProvider(source);
+          if (!_isAlive) return;
+          if (!provider.capabilities.supportsUpdateCheck) {
+            skippedCount++;
+            continue;
+          }
+
+          var tocUrl = book.tocUrl?.trim() ?? '';
+          if (tocUrl.isEmpty) {
+            final originUrl = book.originBookUrl?.trim() ?? '';
+            if (originUrl.isEmpty) {
+              skippedCount++;
+              continue;
+            }
+            try {
+              final detailRes = await provider.getBookDetail(originUrl);
+              if (!_isAlive) return;
+              tocUrl = detailRes.detail.tocUrl.trim().isNotEmpty
+                  ? detailRes.detail.tocUrl.trim()
+                  : originUrl;
+            } catch (_) {
+              tocUrl = originUrl;
+            }
+          }
+
+          final tocRes = await provider.getToc(tocUrl);
+          if (!_isAlive) return;
+          final remoteChapters = tocRes.chapters;
+          if (remoteChapters.isEmpty) {
+            skippedCount++;
+            continue;
+          }
+
+          final existingChapters = await bookRepo.listChapters(book.id);
+          if (!_isAlive) return;
+          final previousCount = math.max(
+            book.totalChapters,
+            existingChapters.length,
+          );
+          if (remoteChapters.length <= previousCount) {
+            if (existingChapters.isEmpty) {
+              final now = DateTime.now().toUtc();
+              final rebuilt = remoteChapters
+                  .asMap()
+                  .entries
+                  .map(
+                    (entry) => entry.value.copyWith(
+                      bookId: book.id,
+                      chapterIndex: entry.key,
+                      isCached: false,
+                      cacheKey: null,
+                      updatedAt: now,
+                    ),
+                  )
+                  .toList(growable: false);
+              await bookRepo.replaceChapters(book.id, rebuilt);
+            }
+            continue;
+          }
+
+          final addedCount = remoteChapters.length - previousCount;
+          final existingByIndex = <int, ChapterMeta>{
+            for (final ch in existingChapters) ch.chapterIndex: ch,
+          };
+          final now = DateTime.now().toUtc();
+          final mergedChapters = remoteChapters
+              .asMap()
+              .entries
+              .map((entry) {
+                final idx = entry.key;
+                final remote = entry.value;
+                final prev = existingByIndex[idx];
+                final sameChapter =
+                    prev != null &&
+                    ((prev.url != null &&
+                            remote.url != null &&
+                            prev.url == remote.url) ||
+                        prev.title == remote.title);
+                return remote.copyWith(
+                  bookId: book.id,
+                  chapterIndex: idx,
+                  isCached: sameChapter ? prev.isCached : false,
+                  cacheKey: sameChapter ? prev.cacheKey : null,
+                  wordCount: sameChapter ? prev.wordCount : remote.wordCount,
+                  updatedAt: now,
+                );
+              })
+              .toList(growable: false);
+
+          await bookRepo.replaceChapters(book.id, mergedChapters);
+          if (!_isAlive) return;
+
+          final updatedBook = book.copyWith(
+            tocUrl: tocUrl,
+            totalChapters: mergedChapters.length,
+            unreadCount: book.unreadCount + addedCount,
+            lastChapterTitle: mergedChapters.last.title,
+            latestChapterAt: now,
+            updatedAt: now,
+          );
+          await bookRepo.saveBook(updatedBook);
+          if (!_isAlive) return;
+
+          updatedBooksCount++;
+          totalNewChapters += addedCount;
+        } catch (_) {
+          skippedCount++;
+        }
+      }
+    }
+
+    final workerCount = math.min(
+      math.max(1, maxConcurrency),
+      onlineBooks.length,
+    );
+    await Future.wait<void>(
+      List<Future<void>>.generate(workerCount, (_) => worker()),
+    );
+    if (!_isAlive) return;
+
+    await refresh();
+    if (!_isAlive) return;
+
+    final String summary;
+    if (updatedBooksCount > 0) {
+      summary =
+          '更新完成：$updatedBooksCount 本书有新章节（共 +$totalNewChapters 章）'
+          '${skippedCount > 0 ? ' · $skippedCount 本书源不可用已跳过' : ''}';
+    } else if (skippedCount > 0) {
+      summary = '检查更新完成：暂无新章节（$skippedCount 本书源缺失或请求失败已跳过）';
+    } else {
+      summary = '检查更新完成：所有在线书籍均已是最新章节';
+    }
+
+    state = state.copyWith(
+      isCheckingUpdates: false,
+      updateStatusMessage: summary,
+    );
+  }
+
+  /// Dismisses active import, update-check, or error banners.
   void clearBanner() {
     if (!_isAlive) return;
-    state = state.copyWith(clearImportStatus: true, clearError: true);
+    state = state.copyWith(
+      clearImportStatus: true,
+      clearUpdateStatus: true,
+      clearError: true,
+    );
   }
 
   /// Sorts [books] keeping pinned books first, then ordering by [mode].

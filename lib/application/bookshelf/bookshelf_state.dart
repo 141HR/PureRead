@@ -14,9 +14,11 @@ class BookshelfState {
   final BookshelfSortMode sortMode;
   final bool isLoading;
   final bool isImporting;
+  final bool isCheckingUpdates;
   final int importDoneCount;
   final int importTotalCount;
   final String? importStatusMessage;
+  final String? updateStatusMessage;
   final String? errorMessage;
   final String searchQuery;
 
@@ -27,9 +29,11 @@ class BookshelfState {
     this.sortMode = BookshelfSortMode.recentRead,
     this.isLoading = false,
     this.isImporting = false,
+    this.isCheckingUpdates = false,
     this.importDoneCount = 0,
     this.importTotalCount = 0,
     this.importStatusMessage,
+    this.updateStatusMessage,
     this.errorMessage,
     this.searchQuery = '',
   });
@@ -53,10 +57,13 @@ class BookshelfState {
     BookshelfSortMode? sortMode,
     bool? isLoading,
     bool? isImporting,
+    bool? isCheckingUpdates,
     int? importDoneCount,
     int? importTotalCount,
     String? importStatusMessage,
     bool clearImportStatus = false,
+    String? updateStatusMessage,
+    bool clearUpdateStatus = false,
     String? errorMessage,
     bool clearError = false,
     String? searchQuery,
@@ -68,11 +75,15 @@ class BookshelfState {
       sortMode: sortMode ?? this.sortMode,
       isLoading: isLoading ?? this.isLoading,
       isImporting: isImporting ?? this.isImporting,
+      isCheckingUpdates: isCheckingUpdates ?? this.isCheckingUpdates,
       importDoneCount: importDoneCount ?? this.importDoneCount,
       importTotalCount: importTotalCount ?? this.importTotalCount,
       importStatusMessage: clearImportStatus
           ? null
           : (importStatusMessage ?? this.importStatusMessage),
+      updateStatusMessage: clearUpdateStatus
+          ? null
+          : (updateStatusMessage ?? this.updateStatusMessage),
       errorMessage: clearError ? null : (errorMessage ?? this.errorMessage),
       searchQuery: searchQuery ?? this.searchQuery,
     );

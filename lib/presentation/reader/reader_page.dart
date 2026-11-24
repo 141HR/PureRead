@@ -7,6 +7,8 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../application/reader/reader_session_controller.dart';
 import '../../application/reader/reader_session_state.dart';
+import '../../domain/domain.dart';
+import '../search/change_source_sheet.dart';
 import 'reader_bookmarks_sheet.dart';
 import 'reader_page_turn_view.dart';
 import 'reader_settings_sheet.dart';
@@ -425,6 +427,30 @@ class _ReaderPageState extends ConsumerState<ReaderPage>
                   ],
                 ),
               ),
+              if (_isOnlineBook(state)) ...[
+                IconButton(
+                  tooltip: '换源',
+                  onPressed: () =>
+                      _openChangeSourceSheet(context, state, controller),
+                  icon: const Icon(Icons.swap_horiz),
+                ),
+                PopupMenuButton<int>(
+                  tooltip: '缓存章节',
+                  icon: const Icon(Icons.download_outlined),
+                  onSelected: (count) =>
+                      _startCacheAhead(context, controller, count),
+                  itemBuilder: (context) => const <PopupMenuEntry<int>>[
+                    PopupMenuItem<int>(
+                      value: 50,
+                      child: Text('缓存后续 50 章'),
+                    ),
+                    PopupMenuItem<int>(
+                      value: 100,
+                      child: Text('缓存后续 100 章'),
+                    ),
+                  ],
+                ),
+              ],
               IconButton(
                 tooltip: '书签',
                 onPressed: () => _openBookmarksSheet(context, state, controller),
@@ -681,6 +707,51 @@ class _ReaderPageState extends ConsumerState<ReaderPage>
               onDeleteBookmark: controller.deleteBookmark,
             );
           },
+        ),
+      ),
+    );
+  }
+
+  bool _isOnlineBook(ReaderSessionState state) {
+    final book = state.book;
+    if (book == null || state.isDemoPreview) return false;
+    return book.providerType == ProviderType.jsPlugin ||
+        book.providerType == ProviderType.legado;
+  }
+
+  Future<void> _openChangeSourceSheet(
+    BuildContext context,
+    ReaderSessionState state,
+    ReaderSessionController controller,
+  ) async {
+    final book = state.book;
+    if (book == null) return;
+    controller.setOverlayVisible(false);
+    final result = await ChangeSourceSheet.show(
+      context,
+      book: book,
+      currentChapterIndex: state.currentChapterIndex,
+      currentChapterTitle: state.currentChapterTitle,
+    );
+    if (!mounted || result == null) return;
+    setState(() => _pendingSeekRatio = null);
+    await controller.applyChangeSourceResult(result);
+  }
+
+  Future<void> _startCacheAhead(
+    BuildContext context,
+    ReaderSessionController controller,
+    int count,
+  ) async {
+    controller.setOverlayVisible(false);
+    final messenger = ScaffoldMessenger.maybeOf(context);
+    final result = await controller.cacheChaptersAhead(count);
+    if (!mounted || result == null) return;
+    messenger?.showSnackBar(
+      SnackBar(
+        content: Text(
+          '缓存完成：新增 ${result.cachedCount} 章，已缓存 ${result.skippedCachedCount} 章'
+          '${result.failedCount > 0 ? '，失败 ${result.failedCount} 章' : ''}',
         ),
       ),
     );
