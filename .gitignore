@@ -1,0 +1,62 @@
+# Miscellaneous
+*.class
+*.log
+*.pyc
+*.swp
+.DS_Store
+.atom/
+.build/
+.buildlog/
+.history
+.svn/
+.swiftpm/
+migrate_working_dir/
+
+# IntelliJ / IDE related
+*.iml
+*.ipr
+*.iws
+.idea/
+.vscode/
+
+# Flutter/Dart/Pub related
+**/doc/api/
+**/ios/Flutter/.last_build_id
+.dart_tool/
+.flutter-plugins
+.flutter-plugins-dependencies
+.pub-cache/
+.pub/
+/build/
+/coverage/
+
+# PoC workspace build & temporary artifacts
+poc/**/.tmp/
+poc/**/build/
+poc/**/.dart_tool/
+poc/**/.flutter-plugins
+poc/**/.flutter-plugins-dependencies
+poc/**/ephemeral/
+poc/**/android/build/
+poc/**/android/.gradle/
+poc/**/android/local.properties
+
+# Symbolication related
+app.*.symbols
+
+# Obfuscation related
+app.*.map.json
+
+# Android Studio / Gradle will place build artifacts here
+/android/build/
+/android/app/debug
+/android/app/profile
+/android/app/release
+/android/.gradle/
+/android/local.properties
+
+# Windows ephemeral build artifacts
+/windows/flutter/ephemeral/
+
+# Widget Preview related
+.widget_preview/

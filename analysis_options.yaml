@@ -1,0 +1,35 @@
+# Static analysis configuration for PureRead.
+# Uses flutter_lints plus strict type-safety rules and excludes sibling PoCs
+# and generated files.
+
+include: package:flutter_lints/flutter.yaml
+
+analyzer:
+  exclude:
+    - poc/**
+    - "**/*.g.dart"
+    - "**/*.freezed.dart"
+    - build/**
+    - android/**
+    - windows/**
+  language:
+    strict-casts: true
+    strict-inference: true
+    strict-raw-types: true
+
+linter:
+  rules:
+    always_declare_return_types: true
+    avoid_dynamic_calls: true
+    avoid_print: true
+    avoid_void_async: true
+    cancel_subscriptions: true
+    close_sinks: true
+    directives_ordering: true
+    prefer_const_constructors: true
+    prefer_const_declarations: true
+    prefer_final_locals: true
+    prefer_single_quotes: true
+    unawaited_futures: true
+    unnecessary_lambdas: true
+    use_super_parameters: true
