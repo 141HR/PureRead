@@ -6,10 +6,13 @@ import 'package:flutter_riverpod/misc.dart';
 import 'package:path/path.dart' as p;
 
 import '../application/backup/backup_providers.dart';
+import '../application/bookshelf/local_epub_providers.dart';
 import '../application/core_providers.dart';
 import '../application/m2_providers.dart';
+import '../application/reader/local_epub_reader_provider.dart';
 import '../domain/domain.dart';
 import '../engine/reader_engine/reader_engine.dart';
+import '../engine/source_engine/local_epub/local_epub.dart';
 import '../engine/source_engine/local_txt/local_txt.dart';
 import '../engine/source_engine/sanitizer/sanitizer.dart';
 import '../engine/source_engine/source_registry.dart';
@@ -28,14 +31,16 @@ const double kDesktopLayoutBreakpoint = 720.0;
 final appTitleProvider = Provider<String>((ref) => 'PureRead');
 
 /// Long-lived runtime services owning the SQLite database, storage resolver,
-/// background TXT isolate worker, font storage service, online HTTP client,
-/// chapter cache store, source engine registry, and backup repository.
+/// background TXT isolate worker, local TXT & EPUB providers, font storage
+/// service, online HTTP client, chapter cache store, source engine registry,
+/// and backup repository.
 class PureReadRuntime {
   factory PureReadRuntime({
     required AppPathResolver pathResolver,
     required AppDatabase database,
     required TxtIsolateWorker txtIsolateWorker,
     required LocalTxtProvider localTxtProvider,
+    LocalEpubProvider? localEpubProvider,
     required FontStorageService fontStorageService,
     SourceHttpClient? sourceHttpClient,
     ChapterCacheStore? chapterCacheStore,
@@ -49,6 +54,7 @@ class PureReadRuntime {
       database: database,
       txtIsolateWorker: txtIsolateWorker,
       localTxtProvider: localTxtProvider,
+      localEpubProvider: localEpubProvider ?? LocalEpubProvider(),
       fontStorageService: fontStorageService,
       sourceHttpClient: resolvedHttpClient,
       chapterCacheStore: chapterCacheStore ?? ChapterCacheStore(pathResolver),
@@ -67,6 +73,7 @@ class PureReadRuntime {
     required this.database,
     required this.txtIsolateWorker,
     required this.localTxtProvider,
+    required this.localEpubProvider,
     required this.fontStorageService,
     required this.sourceHttpClient,
     required this.chapterCacheStore,
@@ -79,6 +86,7 @@ class PureReadRuntime {
   final AppDatabase database;
   final TxtIsolateWorker txtIsolateWorker;
   final LocalTxtProvider localTxtProvider;
+  final LocalEpubProvider localEpubProvider;
   final FontStorageService fontStorageService;
   final SourceHttpClient sourceHttpClient;
   final ChapterCacheStore chapterCacheStore;
@@ -106,7 +114,7 @@ class PureReadRuntime {
 }
 
 /// Resolves application directories, opens the SQLite database with backup
-/// protection, and initializes production M1/M2 runtime services.
+/// protection, and initializes production M1/M2/M3 runtime services.
 Future<PureReadRuntime> bootstrapPureReadRuntime({
   AppPathResolver? pathResolver,
   bool useBackgroundDatabaseIsolate = true,
@@ -119,6 +127,7 @@ Future<PureReadRuntime> bootstrapPureReadRuntime({
   );
   final txtWorker = TxtIsolateWorker();
   final txtProvider = LocalTxtProvider(worker: txtWorker);
+  final epubProvider = LocalEpubProvider();
   final fontStorage = FontStorageService(resolver);
   final sourceHttpClient = SourceHttpClient();
   final chapterCacheStore = ChapterCacheStore(resolver);
@@ -148,6 +157,7 @@ Future<PureReadRuntime> bootstrapPureReadRuntime({
     database: database,
     txtIsolateWorker: txtWorker,
     localTxtProvider: txtProvider,
+    localEpubProvider: epubProvider,
     fontStorageService: fontStorage,
     sourceHttpClient: sourceHttpClient,
     chapterCacheStore: chapterCacheStore,
@@ -257,12 +267,13 @@ class _ChapterCacheGatewayAdapter implements ChapterCacheGateway {
 
 /// Builds production Riverpod [Override]s connecting the presentation and
 /// application layers to Drift repositories, [IncrementalTextPaginator],
-/// [ContentSanitizerImpl], [LocalTxtProvider], [FontStorageService], and M2
-/// online/backup gateways.
+/// [ContentSanitizerImpl], [LocalTxtProvider], [LocalEpubProvider],
+/// [FontStorageService], and M2 online/backup gateways.
 List<Override> buildPureReadOverrides({
   required AppDatabase database,
   required AppPathResolver pathResolver,
   LocalTxtProvider? localTxtProvider,
+  LocalEpubProvider? localEpubProvider,
   FontStorageService? fontStorageService,
   PlatformBridge? platformBridge,
   SourceHttpClient? sourceHttpClient,
@@ -273,6 +284,7 @@ List<Override> buildPureReadOverrides({
 }) {
   final ownsTxtProvider = localTxtProvider == null;
   final txtProvider = localTxtProvider ?? LocalTxtProvider();
+  final epubProvider = localEpubProvider ?? LocalEpubProvider();
   final fontStorage = fontStorageService ?? FontStorageService(pathResolver);
   final fontGateway = _FontStorageGatewayAdapter(fontStorage);
   final cacheStore = chapterCacheStore ?? ChapterCacheStore(pathResolver);
@@ -321,6 +333,35 @@ List<Override> buildPureReadOverrides({
           filePath: path,
           encoding: encoding,
           chapter: chapter,
+        );
+      };
+    }),
+    epubBookImporterProvider.overrideWith((ref) {
+      return (String filePath) async {
+        final imported = await epubProvider.importEpubFile(
+          filePath,
+          coverSaveDir: pathResolver.coversDir.path,
+        );
+        return (book: imported.book, chapters: imported.chapters);
+      };
+    }),
+    localEpubChapterReaderProvider.overrideWith((ref) {
+      return (
+        Book book,
+        ChapterMeta chapter, {
+        List<ChapterMeta>? chapters,
+      }) async {
+        final path = book.localFilePath;
+        if (path == null || path.trim().isEmpty) {
+          throw FileAccessFailure(
+            message: '本地书籍《${book.title}》缺少本地文件路径',
+            filePath: path,
+          );
+        }
+        return epubProvider.readChapterText(
+          filePath: path,
+          chapter: chapter,
+          chapters: chapters,
         );
       };
     }),

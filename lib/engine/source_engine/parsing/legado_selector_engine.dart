@@ -14,11 +14,166 @@ import 'package:xpath_selector_html_parser/xpath_selector_html_parser.dart';
 ///   `@html`, `@all`, `@outerHtml`, `@innerHtml`, `@href`, `@src`, `@attr`)
 /// - XPath (`@XPath:` / `//` / `./`)
 /// - JSONPath (`$.` / `$[` / `@Json:`)
+/// - All-in-one regex list rules (`:pattern` / `@regex:pattern`) with inline
+///   flag translation (`(?s)`, `(?i)`, `(?m)`, `(?is)`, `(?ms)`) and `$0`..`$N`
+///   capture propagation
 /// - Combinators (`||`, `&&`, `%%`)
 /// - Regex replacements (`##pattern##replacement` and `###` first-only)
 /// - `{{...}}`, `{$. ...}`, and `<a,b>` page conditional interpolation
 class LegadoSelectorEngine {
   const LegadoSelectorEngine._();
+
+  static const String _regexMatchEnvelopePrefix = '\u0000__LEGADO_REGEX_MATCH__:';
+  static final RegExp _inlineFlagTokenRegex = RegExp(
+    r'\(\?((?:[imsuxdIMSUD]+(?:-[imsuxdIMSUD]+)?)|(?:-[imsuxdIMSUD]+))([):])',
+  );
+  static final RegExp _captureGroupRefRegex = RegExp(r'\$\{\d+\}|\$\d+');
+
+  /// Returns `true` when [input] carries an encoded all-in-one regex match
+  /// item produced by [selectElements].
+  static bool isRegexMatchEnvelope(String input) =>
+      input.startsWith(_regexMatchEnvelopePrefix);
+
+  /// Encodes a regex match's capture groups (`$0`, `$1`, ...) into an opaque
+  /// item block string for downstream field evaluation.
+  static String encodeRegexMatch(List<String> groups) =>
+      '$_regexMatchEnvelopePrefix${jsonEncode(groups)}';
+
+  /// Decodes an item block produced by an all-in-one `:regex` / `@regex:` list
+  /// rule into its capture groups (`$0`, `$1`, ...), or `null` for normal HTML/JSON.
+  static List<String>? decodeRegexMatch(String input) {
+    if (!input.startsWith(_regexMatchEnvelopePrefix)) return null;
+    try {
+      final decoded = jsonDecode(
+        input.substring(_regexMatchEnvelopePrefix.length),
+      );
+      if (decoded is List) {
+        return decoded.map((e) => e?.toString() ?? '').toList(growable: false);
+      }
+    } catch (_) {}
+    return null;
+  }
+
+  /// Returns `true` when [rule] uses all-in-one `:regex` (excluding `::`) or
+  /// `@regex:` syntax.
+  static bool isRegexListRule(String rule) {
+    final trimmed = rule.trim();
+    if (trimmed.isEmpty) return false;
+    if (trimmed.toLowerCase().startsWith('@regex:')) return true;
+    return trimmed.startsWith(':') && !trimmed.startsWith('::');
+  }
+
+  /// Returns `true` when [template] references capture group placeholders such
+  /// as `$0`, `$1`, `$2`, or `${1}`.
+  static bool containsCaptureGroupRef(String template) =>
+      _captureGroupRefRegex.hasMatch(template);
+
+  /// Expands `$0`, `$1`, ..., `${N}` capture placeholders in [template] from
+  /// [groups].
+  static String expandCaptureGroups(String template, List<String> groups) {
+    if (!template.contains(r'$')) return template;
+    return template.replaceAllMapped(RegExp(r'\$\{(\d+)\}|\$(\d+)'), (m) {
+      final idxStr = m.group(1) ?? m.group(2)!;
+      final groupIdx = int.tryParse(idxStr);
+      if (groupIdx != null && groupIdx >= 0 && groupIdx < groups.length) {
+        return groups[groupIdx];
+      }
+      return m.group(0)!;
+    });
+  }
+
+  /// Compiles a Java/PCRE-flavored Legado regex pattern into a Dart [RegExp],
+  /// translating inline flag directives (`(?s)`, `(?i)`, `(?m)`, `(?is)`,
+  /// `(?ms)`, etc.) into `dotAll`, `caseSensitive`, and `multiLine`.
+  ///
+  /// Returns `null` when [rawPattern] is empty or syntactically invalid.
+  static RegExp? compileLegadoRegex(
+    String rawPattern, {
+    bool defaultDotAll = false,
+    bool defaultMultiLine = false,
+    bool defaultCaseSensitive = true,
+  }) {
+    if (rawPattern.isEmpty) return null;
+    var dotAll = defaultDotAll;
+    var multiLine = defaultMultiLine;
+    var caseSensitive = defaultCaseSensitive;
+
+    final out = StringBuffer();
+    var inCharClass = false;
+    var i = 0;
+
+    while (i < rawPattern.length) {
+      final ch = rawPattern[i];
+      if (ch == r'\' && i + 1 < rawPattern.length) {
+        out.write(ch);
+        out.write(rawPattern[i + 1]);
+        i += 2;
+        continue;
+      }
+      if (ch == '[' && !inCharClass) {
+        inCharClass = true;
+        out.write(ch);
+        i++;
+        continue;
+      }
+      if (ch == ']' && inCharClass) {
+        inCharClass = false;
+        out.write(ch);
+        i++;
+        continue;
+      }
+
+      if (!inCharClass &&
+          ch == '(' &&
+          i + 2 < rawPattern.length &&
+          rawPattern[i + 1] == '?') {
+        final match = _inlineFlagTokenRegex.matchAsPrefix(rawPattern, i);
+        if (match != null) {
+          final flagSpec = match.group(1)!;
+          final terminator = match.group(2)!;
+          var neg = false;
+          for (var j = 0; j < flagSpec.length; j++) {
+            final f = flagSpec[j].toLowerCase();
+            if (f == '-') {
+              neg = true;
+              continue;
+            }
+            switch (f) {
+              case 's':
+                dotAll = !neg;
+              case 'm':
+                multiLine = !neg;
+              case 'i':
+                caseSensitive = neg;
+              default:
+                break;
+            }
+          }
+          if (terminator == ':') {
+            out.write('(?:');
+          }
+          i = match.end;
+          continue;
+        }
+      }
+
+      out.write(ch);
+      i++;
+    }
+
+    final cleaned = out.toString();
+    if (cleaned.isEmpty) return null;
+    try {
+      return RegExp(
+        cleaned,
+        dotAll: dotAll,
+        multiLine: multiLine,
+        caseSensitive: caseSensitive,
+      );
+    } on FormatException {
+      return null;
+    }
+  }
 
   static const Set<String> _knownExtractors = <String>{
     'text',
@@ -130,7 +285,7 @@ class LegadoSelectorEngine {
   }) {
     final trimmed = rule.trim();
     if (trimmed.isEmpty) return '';
-    final orParts = _splitTopLevel(trimmed, '||');
+    final orParts = splitTopLevel(trimmed, '||');
     if (orParts.length > 1) {
       for (final branch in orParts) {
         final val = selectOne(input, branch, joinSeparator: joinSeparator);
@@ -139,7 +294,7 @@ class LegadoSelectorEngine {
       return '';
     }
 
-    final andParts = _splitTopLevel(trimmed, '&&');
+    final andParts = splitTopLevel(trimmed, '&&');
     if (andParts.length > 1) {
       final combined = <String>[];
       for (final branch in andParts) {
@@ -154,13 +309,23 @@ class LegadoSelectorEngine {
   }
 
   /// Evaluates a list selector rule (e.g. `bookList` or `chapterList`) and
-  /// returns HTML `outerHtml` snippets or JSON-encoded element strings.
+  /// returns HTML `outerHtml` snippets, JSON-encoded element strings, or
+  /// capture-group envelopes for `:regex` / `@regex:` rules.
   static List<String> selectElements(String input, String listRule) {
     final trimmed = listRule.trim();
     if (trimmed.isEmpty) return const <String>[];
+    final regexGroups = decodeRegexMatch(input);
+    final effectiveInput = regexGroups == null
+        ? input
+        : (regexGroups.isEmpty ? '' : regexGroups[0]);
+
+    if (isRegexListRule(trimmed)) {
+      return _selectRegexElements(effectiveInput, trimmed);
+    }
+
     return _evalCombinators<String>(
       trimmed,
-      leafEval: (branch) => _evaluateSingleElementRule(input, branch),
+      leafEval: (branch) => _evaluateSingleElementRule(effectiveInput, branch),
     );
   }
 
@@ -306,21 +471,22 @@ class LegadoSelectorEngine {
     }
     if (pattern.isEmpty) return text;
 
-    try {
-      final regex = RegExp(pattern, multiLine: true, dotAll: true);
-      final updated = firstOnly
-          ? text.replaceFirstMapped(
-              regex,
-              (m) => _expandReplacement(replacement, m),
-            )
-          : text.replaceAllMapped(
-              regex,
-              (m) => _expandReplacement(replacement, m),
-            );
-      return updated.trim();
-    } on FormatException {
-      return text;
-    }
+    final regex = compileLegadoRegex(
+      pattern,
+      defaultMultiLine: true,
+      defaultDotAll: true,
+    );
+    if (regex == null) return text;
+    final updated = firstOnly
+        ? text.replaceFirstMapped(
+            regex,
+            (m) => _expandReplacement(replacement, m),
+          )
+        : text.replaceAllMapped(
+            regex,
+            (m) => _expandReplacement(replacement, m),
+          );
+    return updated.trim();
   }
 
   /// Resolves Legado `<firstPage,nextPages>` page conditionals.
@@ -410,7 +576,7 @@ class LegadoSelectorEngine {
     String rule, {
     required List<T> Function(String branch) leafEval,
   }) {
-    final orParts = _splitTopLevel(rule, '||');
+    final orParts = splitTopLevel(rule, '||');
     if (orParts.length > 1) {
       for (final part in orParts) {
         final res = _evalCombinators<T>(part, leafEval: leafEval);
@@ -419,7 +585,7 @@ class LegadoSelectorEngine {
       return <T>[];
     }
 
-    final andParts = _splitTopLevel(rule, '&&');
+    final andParts = splitTopLevel(rule, '&&');
     if (andParts.length > 1) {
       final combined = <T>[];
       for (final part in andParts) {
@@ -428,7 +594,7 @@ class LegadoSelectorEngine {
       return combined;
     }
 
-    final zipParts = _splitTopLevel(rule, '%%');
+    final zipParts = splitTopLevel(rule, '%%');
     if (zipParts.length > 1) {
       final lists = zipParts
           .map((part) => _evalCombinators<T>(part, leafEval: leafEval))
@@ -454,26 +620,38 @@ class LegadoSelectorEngine {
   }
 
   static List<String> _evaluateSingleValueRule(String input, String rule) {
-    final (:selectorPart, :regexSpec) = _splitTrailingRegex(rule);
+    final regexGroups = decodeRegexMatch(input);
+    final effectiveInput = regexGroups == null
+        ? input
+        : (regexGroups.isEmpty ? '' : regexGroups[0]);
+    final (:selectorPart, :regexSpec) = splitTrailingRegex(rule);
 
     List<String> extracted;
     if (selectorPart.isEmpty) {
-      extracted = <String>[input];
+      extracted = <String>[effectiveInput];
+    } else if (regexGroups != null && containsCaptureGroupRef(selectorPart)) {
+      extracted = <String>[expandCaptureGroups(selectorPart, regexGroups)];
     } else if (_isXPathRule(selectorPart)) {
       final expr = _stripPrefixCaseInsensitive(selectorPart, '@xpath:');
-      extracted = selectXPath(input, expr);
+      extracted = selectXPath(effectiveInput, expr);
     } else if (_isJsonPathRule(selectorPart)) {
       final expr = _stripPrefixCaseInsensitive(selectorPart, '@json:');
-      extracted = selectJsonPath(input, expr);
+      extracted = selectJsonPath(effectiveInput, expr);
     } else if (selectorPart.toLowerCase().startsWith('@css:')) {
       final cssRule = selectorPart.substring(5).trim();
-      extracted = _evaluateCssChain(input, cssRule, forceStandardCss: true);
+      extracted = _evaluateCssChain(
+        effectiveInput,
+        cssRule,
+        forceStandardCss: true,
+      );
     } else {
-      extracted = _evaluateCssChain(input, selectorPart);
+      extracted = _evaluateCssChain(effectiveInput, selectorPart);
     }
 
     if (regexSpec.isEmpty) {
-      return extracted;
+      return extracted
+          .where((item) => item.isNotEmpty)
+          .toList(growable: false);
     }
     return extracted
         .map((item) => applyRegexSpec(item, regexSpec))
@@ -481,11 +659,173 @@ class LegadoSelectorEngine {
         .toList(growable: false);
   }
 
+  static List<String> _selectRegexElements(String input, String rule) {
+    final orParts = _splitRegexCombinator(rule, '||');
+    if (orParts.length > 1) {
+      for (var i = 0; i < orParts.length; i++) {
+        final branch = orParts[i].trim();
+        final effectiveBranch = (i > 0 && !_hasExplicitModePrefix(branch))
+            ? '@regex:$branch'
+            : branch;
+        final res = selectElements(input, effectiveBranch);
+        if (res.isNotEmpty) return res;
+      }
+      return const <String>[];
+    }
+
+    final zipParts = _splitRegexCombinator(rule, '%%');
+    if (zipParts.length > 1) {
+      return _evalCombinators<String>(
+        rule,
+        leafEval: (branch) => _evaluateSingleElementRule(input, branch),
+      );
+    }
+
+    final rawBody = _stripRegexListPrefix(rule);
+    final andParts = _splitRegexCombinator(rawBody, '&&');
+    if (andParts.length > 1) {
+      final hasExplicitSubMode = andParts
+          .skip(1)
+          .any((p) => _hasExplicitModePrefix(p.trim()));
+      if (hasExplicitSubMode) {
+        final combined = <String>[];
+        for (var i = 0; i < andParts.length; i++) {
+          final part = andParts[i].trim();
+          final effective = i == 0 ? '@regex:$part' : part;
+          combined.addAll(selectElements(input, effective));
+        }
+        return combined;
+      }
+      return _evaluateRegexNarrowChain(input, andParts);
+    }
+
+    return _evaluateRegexListMatches(input, rawBody);
+  }
+
+  static List<String> _splitRegexCombinator(String rule, String operator) {
+    final parts = <String>[];
+    var inCharClass = false;
+    var parenDepth = 0;
+    var start = 0;
+
+    for (var i = 0; i < rule.length; i++) {
+      final ch = rule.codeUnitAt(i);
+      if (ch == 0x5C) {
+        i++;
+        continue;
+      }
+      if (ch == 0x5B && !inCharClass) {
+        inCharClass = true;
+      } else if (ch == 0x5D && inCharClass) {
+        inCharClass = false;
+      } else if (!inCharClass) {
+        if (ch == 0x28) {
+          parenDepth++;
+        } else if (ch == 0x29 && parenDepth > 0) {
+          parenDepth--;
+        } else if (parenDepth == 0 && rule.startsWith(operator, i)) {
+          parts.add(rule.substring(start, i).trim());
+          start = i + operator.length;
+          i += operator.length - 1;
+        }
+      }
+    }
+    parts.add(rule.substring(start).trim());
+    return parts.where((p) => p.isNotEmpty).toList(growable: false);
+  }
+
+  static List<String> _evaluateRegexNarrowChain(
+    String input,
+    List<String> patterns,
+  ) {
+    var currentText = input;
+    var dotAll = false;
+    var multiLine = false;
+    var caseSensitive = true;
+    for (var i = 0; i < patterns.length - 1; i++) {
+      final regex = compileLegadoRegex(
+        patterns[i].trim(),
+        defaultDotAll: dotAll,
+        defaultMultiLine: multiLine,
+        defaultCaseSensitive: caseSensitive,
+      );
+      if (regex == null) return const <String>[];
+      dotAll = regex.isDotAll;
+      multiLine = regex.isMultiLine;
+      caseSensitive = regex.isCaseSensitive;
+      final matched = regex
+          .allMatches(currentText)
+          .map((m) => m.group(0) ?? '')
+          .where((s) => s.isNotEmpty)
+          .toList(growable: false);
+      if (matched.isEmpty) return const <String>[];
+      currentText = matched.join('\n');
+    }
+    return _evaluateRegexListMatches(
+      currentText,
+      patterns.last.trim(),
+      defaultDotAll: dotAll,
+      defaultMultiLine: multiLine,
+      defaultCaseSensitive: caseSensitive,
+    );
+  }
+
+  static List<String> _evaluateRegexListMatches(
+    String input,
+    String pattern, {
+    bool defaultDotAll = false,
+    bool defaultMultiLine = false,
+    bool defaultCaseSensitive = true,
+  }) {
+    final regex = compileLegadoRegex(
+      pattern,
+      defaultDotAll: defaultDotAll,
+      defaultMultiLine: defaultMultiLine,
+      defaultCaseSensitive: defaultCaseSensitive,
+    );
+    if (regex == null) return const <String>[];
+    final out = <String>[];
+    for (final match in regex.allMatches(input)) {
+      final full = match.group(0) ?? '';
+      if (full.isEmpty) continue;
+      final groups = List<String>.generate(
+        match.groupCount + 1,
+        (idx) => match.group(idx) ?? '',
+        growable: false,
+      );
+      out.add(encodeRegexMatch(groups));
+    }
+    return out;
+  }
+
+  static String _stripRegexListPrefix(String rule) {
+    final trimmed = rule.trim();
+    if (trimmed.toLowerCase().startsWith('@regex:')) {
+      return trimmed.substring(7).trim();
+    }
+    if (trimmed.startsWith(':') && !trimmed.startsWith('::')) {
+      return trimmed.substring(1);
+    }
+    return trimmed;
+  }
+
+  static bool _hasExplicitModePrefix(String branch) {
+    final lower = branch.toLowerCase();
+    return isRegexListRule(branch) ||
+        lower.startsWith('@css:') ||
+        _isXPathRule(branch) ||
+        _isJsonPathRule(branch);
+  }
+
   static List<String> _evaluateSingleElementRule(
     String input,
     String listRule,
   ) {
-    final (:selectorPart, :regexSpec) = _splitTrailingRegex(listRule);
+    if (isRegexListRule(listRule)) {
+      return _selectRegexElements(input, listRule);
+    }
+
+    final (:selectorPart, :regexSpec) = splitTrailingRegex(listRule);
     final targetRule = selectorPart.isEmpty ? listRule : selectorPart;
 
     if (_isXPathRule(targetRule)) {
@@ -970,7 +1310,9 @@ class LegadoSelectorEngine {
     return input;
   }
 
-  static ({String selectorPart, String regexSpec}) _splitTrailingRegex(
+  /// Splits trailing `##pattern##replacement` out of [rule] outside quotes and
+  /// brackets.
+  static ({String selectorPart, String regexSpec}) splitTrailingRegex(
     String rule,
   ) {
     var inSingle = false;
@@ -1017,7 +1359,9 @@ class LegadoSelectorEngine {
     return (selectorPart: rule.trim(), regexSpec: '');
   }
 
-  static List<String> _splitTopLevel(String rule, String operator) {
+  /// Splits [rule] on top-level combinator [operator] (`||`, `&&`, `%%`)
+  /// outside quotes and brackets.
+  static List<String> splitTopLevel(String rule, String operator) {
     final parts = <String>[];
     var inSingle = false;
     var inDouble = false;

@@ -6,11 +6,13 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../domain/domain.dart';
 import '../../infrastructure/platform/platform_bridge.dart';
+import '../bookshelf/local_epub_providers.dart';
 import '../core_providers.dart';
 import '../m2_providers.dart';
 import '../search/change_source_state.dart';
 import 'chapter_preload_scheduler.dart';
 import 'demo_book_content.dart';
+import 'local_epub_reader_provider.dart';
 import 'reader_session_state.dart';
 import 'reader_theme_x.dart';
 
@@ -101,6 +103,33 @@ class ReaderSessionController extends Notifier<ReaderSessionState> {
     if (!_isAlive) return const <ChapterMeta>[];
     final now = DateTime.now().toUtc();
     final normalized = tocRes.chapters
+        .asMap()
+        .entries
+        .map(
+          (entry) => entry.value.copyWith(
+            bookId: book.id,
+            chapterIndex: entry.key,
+            updatedAt: now,
+          ),
+        )
+        .toList(growable: false);
+    if (normalized.isNotEmpty) {
+      await bookRepo.replaceChapters(book.id, normalized);
+    }
+    return normalized;
+  }
+
+  Future<List<ChapterMeta>> _rebuildAndPersistLocalEpubToc({
+    required Book book,
+    required BookRepository bookRepo,
+  }) async {
+    final filePath = book.localFilePath?.trim() ?? '';
+    if (filePath.isEmpty) return const <ChapterMeta>[];
+    final epubImporter = ref.read(epubBookImporterProvider);
+    final imported = await epubImporter(filePath);
+    if (!_isAlive) return const <ChapterMeta>[];
+    final now = DateTime.now().toUtc();
+    final normalized = imported.chapters
         .asMap()
         .entries
         .map(
@@ -331,24 +360,31 @@ class ReaderSessionController extends Notifier<ReaderSessionState> {
       var effectiveBook = loadedBook;
       if (_isOnlineBook(loadedBook)) {
         _ensurePreloadScheduler();
-        if (loadedBook.unreadCount > 0) {
-          effectiveBook = loadedBook.copyWith(
-            unreadCount: 0,
-            updatedAt: DateTime.now().toUtc(),
-          );
-          try {
-            await bookRepo.saveBook(effectiveBook);
-          } catch (_) {
-            // Non-critical unread count reset failure.
-          }
-          if (!_isAlive) return;
+      }
+      if (loadedBook.unreadCount > 0) {
+        effectiveBook = loadedBook.copyWith(
+          unreadCount: 0,
+          updatedAt: DateTime.now().toUtc(),
+        );
+        try {
+          await bookRepo.saveBook(effectiveBook);
+        } catch (_) {
+          // Non-critical unread count reset failure.
         }
+        if (!_isAlive) return;
       }
 
       var chapters = await bookRepo.listChapters(bookId);
       if (!_isAlive) return;
       if (chapters.isEmpty && _isOnlineBook(effectiveBook)) {
         chapters = await _fetchAndPersistOnlineToc(
+          book: effectiveBook,
+          bookRepo: bookRepo,
+        );
+        if (!_isAlive) return;
+      } else if (chapters.isEmpty &&
+          effectiveBook.providerType == ProviderType.localEpub) {
+        chapters = await _rebuildAndPersistLocalEpubToc(
           book: effectiveBook,
           bookRepo: bookRepo,
         );
@@ -671,7 +707,6 @@ class ReaderSessionController extends Notifier<ReaderSessionState> {
     if (!_isAlive) return '';
 
     final sourceEpoch = _sourceEpoch;
-    final localTxtReader = ref.read(localTxtChapterReaderProvider);
     final sanitizer = ref.read(contentSanitizerProvider);
     final isDemo = state.isDemoPreview;
     final book = state.book;
@@ -692,11 +727,14 @@ class ReaderSessionController extends Notifier<ReaderSessionState> {
       chapterTitle = chapter.title;
       switch (book.providerType) {
         case ProviderType.localTxt:
+          final localTxtReader = ref.read(localTxtChapterReaderProvider);
           rawText = await localTxtReader(book, chapter);
         case ProviderType.localEpub:
-          throw FileAccessFailure(
-            message: '暂不支持本地 EPUB 章节读取（${book.title}）',
-            filePath: book.localFilePath,
+          final localEpubReader = ref.read(localEpubChapterReaderProvider);
+          rawText = await localEpubReader(
+            book,
+            chapter,
+            chapters: chapters,
           );
         case ProviderType.jsPlugin:
         case ProviderType.legado:

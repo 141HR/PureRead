@@ -5,10 +5,11 @@ import 'package:flutter/material.dart';
 
 import '../../domain/domain.dart';
 import 'reader_page_painter.dart';
+import 'simulation_page_curl.dart';
 
-/// Renders paginated reader pages across `none`, `slide`, `cover`, and `scroll`
-/// page-turn modes, supporting tap zones, interactive drag with cancel
-/// spring-back, and throttled mouse-wheel paging.
+/// Renders paginated reader pages across `none`, `slide`, `cover`, `simulation`,
+/// and `scroll` page-turn modes, supporting tap zones, interactive drag with
+/// cancel spring-back, and throttled mouse-wheel paging.
 class ReaderPageTurnView extends StatefulWidget {
   const ReaderPageTurnView({
     super.key,
@@ -66,6 +67,7 @@ class _ReaderPageTurnViewState extends State<ReaderPageTurnView>
   PageSlice? _outgoingLeft;
   PageSlice? _outgoingRight;
   int _externalAnimDirection = 0; // -1: forward, 1: backward, 0: none
+  bool _lastSimulationForward = true;
 
   DateTime _lastWheelTurnAt = DateTime.fromMillisecondsSinceEpoch(0);
 
@@ -86,11 +88,30 @@ class _ReaderPageTurnViewState extends State<ReaderPageTurnView>
         oldWidget.currentPageIndex != widget.currentPageIndex ||
         oldWidget.currentChapterIndex != widget.currentChapterIndex;
 
+    if (widget.mode == PageTurnMode.simulation) {
+      if (oldWidget.mode != PageTurnMode.simulation) {
+        _animController.stop();
+        _outgoingLeft = null;
+        _outgoingRight = null;
+        _externalAnimDirection = 0;
+        _dragDirection = 0;
+        _dragOffset = 0.0;
+        _isDragging = false;
+      }
+      if (pageChanged) {
+        _lastSimulationForward =
+            widget.currentChapterIndex > oldWidget.currentChapterIndex ||
+            (widget.currentChapterIndex == oldWidget.currentChapterIndex &&
+                widget.currentPageIndex > oldWidget.currentPageIndex);
+      }
+      _pendingTurnHandled = false;
+      return;
+    }
+
     if (pageChanged && !_pendingTurnHandled) {
       final supportsAnimatedTurn =
           widget.mode == PageTurnMode.slide ||
-          widget.mode == PageTurnMode.cover ||
-          widget.mode == PageTurnMode.simulation;
+          widget.mode == PageTurnMode.cover;
       if (supportsAnimatedTurn && oldWidget.pages.isNotEmpty) {
         final oldLeft = _sliceAt(oldWidget.pages, oldWidget.currentPageIndex);
         final oldRight = oldWidget.columnCount == 2
@@ -149,6 +170,50 @@ class _ReaderPageTurnViewState extends State<ReaderPageTurnView>
         ? _sliceAt(widget.pages, widget.currentPageIndex + 1)
         : null;
 
+    if (widget.mode == PageTurnMode.simulation) {
+      return Listener(
+        onPointerSignal: _handlePointerSignal,
+        child: SimulationPageCurlView(
+          pageKey: ValueKey<String>(
+            '${widget.currentChapterIndex}:${widget.currentPageIndex}',
+          ),
+          currentChild: _paintCanvas(currLeft, currRight),
+          nextChildBuilder: () {
+            final nextOffset = widget.currentPageIndex + widget.columnCount;
+            final nextLeft = _sliceAt(widget.pages, nextOffset);
+            final nextRight = widget.columnCount == 2
+                ? _sliceAt(widget.pages, nextOffset + 1)
+                : null;
+            return _paintCanvas(nextLeft, nextRight);
+          },
+          prevChildBuilder: () {
+            final hasPrevInChapter = widget.currentPageIndex > 0;
+            final prevOffset = math.max(
+              0,
+              widget.currentPageIndex - widget.columnCount,
+            );
+            final prevLeft = hasPrevInChapter
+                ? _sliceAt(widget.pages, prevOffset)
+                : null;
+            final prevRight = (hasPrevInChapter && widget.columnCount == 2)
+                ? _sliceAt(widget.pages, prevOffset + 1)
+                : null;
+            return _paintCanvas(prevLeft, prevRight);
+          },
+          canGoPrev: widget.canGoPrev,
+          canGoNext: widget.canGoNext,
+          paperColor: widget.backgroundColor,
+          showOverlay: widget.showOverlay,
+          onNextPage: widget.onNextPage,
+          onPrevPage: widget.onPrevPage,
+          onToggleOverlay: widget.onToggleOverlay,
+          lastTurnDirection: _lastSimulationForward
+              ? CurlDirection.forward
+              : CurlDirection.backward,
+        ),
+      );
+    }
+
     return Listener(
       onPointerSignal: _handlePointerSignal,
       child: LayoutBuilder(
@@ -181,9 +246,7 @@ class _ReaderPageTurnViewState extends State<ReaderPageTurnView>
   }
 
   bool get _supportsHorizontalDrag =>
-      widget.mode == PageTurnMode.slide ||
-      widget.mode == PageTurnMode.cover ||
-      widget.mode == PageTurnMode.simulation;
+      widget.mode == PageTurnMode.slide || widget.mode == PageTurnMode.cover;
 
   Widget _buildPagedStack({
     required double width,
@@ -194,9 +257,7 @@ class _ReaderPageTurnViewState extends State<ReaderPageTurnView>
       return _paintCanvas(currLeft, currRight);
     }
 
-    final isCoverMode =
-        widget.mode == PageTurnMode.cover ||
-        widget.mode == PageTurnMode.simulation;
+    final isCoverMode = widget.mode == PageTurnMode.cover;
 
     // External non-drag animated page transition (tap, keyboard, wheel, volume).
     if (_externalAnimDirection != 0 && _outgoingLeft != null) {

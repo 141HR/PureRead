@@ -22,6 +22,7 @@ Future<void> _launchPureReadApp() async {
           database: runtime.database,
           pathResolver: runtime.pathResolver,
           localTxtProvider: runtime.localTxtProvider,
+          localEpubProvider: runtime.localEpubProvider,
           fontStorageService: runtime.fontStorageService,
           sourceHttpClient: runtime.sourceHttpClient,
           chapterCacheStore: runtime.chapterCacheStore,

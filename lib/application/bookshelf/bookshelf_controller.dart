@@ -8,6 +8,7 @@ import '../../domain/domain.dart';
 import '../core_providers.dart';
 import '../m2_providers.dart';
 import 'bookshelf_state.dart';
+import 'local_epub_providers.dart';
 
 const String _kViewModeSettingKey = 'bookshelf_view_mode';
 const String _kSortModeSettingKey = 'bookshelf_sort_mode';
@@ -17,8 +18,9 @@ final bookshelfControllerProvider =
       BookshelfController.new,
     );
 
-/// Manages bookshelf sorting, view mode persistence, pin/unpin, deletion,
-/// and single/batch local TXT book imports.
+/// Manages bookshelf sorting, view mode persistence, group management (F1.3),
+/// pin/unpin, deletion with optional chapter cache cleanup, and unified
+/// single/batch local TXT & EPUB imports.
 class BookshelfController extends Notifier<BookshelfState> {
   StreamSubscription<List<Book>>? _booksSub;
   bool _disposed = false;
@@ -93,9 +95,24 @@ class BookshelfController extends Notifier<BookshelfState> {
     await refresh();
   }
 
-  Future<void> _applyLoadedBooks(List<Book> rawBooks) async {
+  Future<void> _applyLoadedBooks(
+    List<Book> rawBooks, {
+    List<BookGroup>? loadedGroups,
+  }) async {
     if (!_isAlive) return;
     final bookRepo = ref.read(bookRepositoryProvider);
+
+    var groups = loadedGroups ?? state.groups;
+    if (loadedGroups == null) {
+      try {
+        groups = await bookRepo.listGroups();
+        if (!_isAlive) return;
+      } catch (_) {
+        // Keep existing groups if transient lookup fails.
+      }
+    }
+    final sortedGroups = _sortGroups(groups);
+
     final progressMap = <String, ReadingProgress>{};
     for (final book in rawBooks) {
       if (!_isAlive) return;
@@ -110,20 +127,38 @@ class BookshelfController extends Notifier<BookshelfState> {
       }
     }
     if (!_isAlive) return;
+
+    final existingBookIds = rawBooks.map((b) => b.id).toSet();
+    final validSelectedBookIds = state.selectedBookIds
+        .where(existingBookIds.contains)
+        .toSet();
+    final selectedGroupStillValid =
+        state.selectedGroupId == null ||
+        state.selectedGroupId == kUngroupedBookGroupFilterId ||
+        sortedGroups.any((g) => g.id == state.selectedGroupId);
+
     state = state.copyWith(
       books: sortBooks(rawBooks, state.sortMode),
+      groups: sortedGroups,
+      clearSelectedGroup: !selectedGroupStillValid,
+      selectedBookIds: validSelectedBookIds,
+      isSelectionMode:
+          validSelectedBookIds.isNotEmpty ? state.isSelectionMode : false,
       progressByBookId: progressMap,
       isLoading: false,
     );
   }
 
-  /// Reloads books and their reading progress snapshots from the repository.
+  /// Reloads books, groups, and reading progress snapshots from the repository.
   Future<void> refresh() async {
     if (!_isAlive) return;
     final bookRepo = ref.read(bookRepositoryProvider);
     try {
       final books = await bookRepo.listBooks();
-      await _applyLoadedBooks(books);
+      if (!_isAlive) return;
+      final groups = await bookRepo.listGroups();
+      if (!_isAlive) return;
+      await _applyLoadedBooks(books, loadedGroups: groups);
     } catch (error) {
       if (!_isAlive) return;
       state = state.copyWith(
@@ -159,6 +194,192 @@ class BookshelfController extends Notifier<BookshelfState> {
     state = state.copyWith(searchQuery: query);
   }
 
+  /// Selects a group filter (`null` = 全部, [kUngroupedBookGroupFilterId] = 未分组).
+  void selectGroup(String? groupId) {
+    if (!_isAlive) return;
+    state = state.copyWith(
+      selectedGroupId: groupId,
+      clearSelectedGroup: groupId == null,
+      selectedBookIds: const <String>{},
+    );
+  }
+
+  /// Creates a new custom [BookGroup] with [name] and refreshes the group list.
+  Future<BookGroup?> createGroup(String name) async {
+    if (!_isAlive) return null;
+    final trimmed = name.trim();
+    if (trimmed.isEmpty) {
+      state = state.copyWith(errorMessage: '分组名称不能为空');
+      return null;
+    }
+
+    final bookRepo = ref.read(bookRepositoryProvider);
+    try {
+      final existing = await bookRepo.listGroups();
+      if (!_isAlive) return null;
+      final maxOrder = existing.fold<int>(
+        0,
+        (prev, g) => math.max(prev, g.sortOrder),
+      );
+      final now = DateTime.now().toUtc();
+      final group = BookGroup(
+        id: 'grp_${now.microsecondsSinceEpoch}',
+        name: trimmed,
+        sortOrder: maxOrder + 1,
+        createdAt: now,
+        updatedAt: now,
+      );
+      await bookRepo.saveGroup(group);
+      if (!_isAlive) return null;
+      await refresh();
+      return group;
+    } catch (error) {
+      if (!_isAlive) return null;
+      state = state.copyWith(errorMessage: _formatError(error));
+      return null;
+    }
+  }
+
+  /// Renames [groupId] to [newName] and refreshes the group list.
+  Future<void> renameGroup(String groupId, String newName) async {
+    if (!_isAlive) return;
+    final trimmed = newName.trim();
+    if (trimmed.isEmpty) {
+      state = state.copyWith(errorMessage: '分组名称不能为空');
+      return;
+    }
+
+    final bookRepo = ref.read(bookRepositoryProvider);
+    try {
+      final groups = await bookRepo.listGroups();
+      if (!_isAlive) return;
+      final idx = groups.indexWhere((g) => g.id == groupId);
+      if (idx < 0) return;
+      final updated = groups[idx].copyWith(
+        name: trimmed,
+        updatedAt: DateTime.now().toUtc(),
+      );
+      await bookRepo.saveGroup(updated);
+      if (!_isAlive) return;
+      await refresh();
+    } catch (error) {
+      if (!_isAlive) return;
+      state = state.copyWith(errorMessage: _formatError(error));
+    }
+  }
+
+  /// Deletes [groupId] and frees any books in that group to `groupId = null`.
+  Future<void> deleteGroup(String groupId) async {
+    if (!_isAlive) return;
+    final bookRepo = ref.read(bookRepositoryProvider);
+    try {
+      await bookRepo.deleteGroup(groupId);
+      if (!_isAlive) return;
+
+      // Ensure repositories without SQLite ON DELETE SET NULL also unassign books.
+      final allBooks = await bookRepo.listBooks();
+      if (!_isAlive) return;
+      final now = DateTime.now().toUtc();
+      for (final book in allBooks) {
+        if (book.groupId == groupId) {
+          await bookRepo.saveBook(
+            book.copyWith(clearGroupId: true, updatedAt: now),
+          );
+          if (!_isAlive) return;
+        }
+      }
+
+      if (state.selectedGroupId == groupId) {
+        state = state.copyWith(clearSelectedGroup: true);
+      }
+      await refresh();
+    } catch (error) {
+      if (!_isAlive) return;
+      state = state.copyWith(errorMessage: _formatError(error));
+    }
+  }
+
+  /// Moves a single [bookId] into [groupId] (or ungrouped when `null`).
+  Future<void> moveBookToGroup(String bookId, String? groupId) {
+    return moveBooksToGroup(<String>[bookId], groupId);
+  }
+
+  /// Moves all books in [bookIds] into [groupId] (or ungrouped when `null`).
+  Future<void> moveBooksToGroup(
+    Iterable<String> bookIds,
+    String? groupId,
+  ) async {
+    if (!_isAlive) return;
+    final ids = bookIds.toSet();
+    if (ids.isEmpty) return;
+
+    final bookRepo = ref.read(bookRepositoryProvider);
+    try {
+      final now = DateTime.now().toUtc();
+      for (final id in ids) {
+        final existing = await bookRepo.getBookById(id);
+        if (!_isAlive) return;
+        if (existing == null) continue;
+        final updated = groupId == null
+            ? existing.copyWith(clearGroupId: true, updatedAt: now)
+            : existing.copyWith(groupId: groupId, updatedAt: now);
+        await bookRepo.saveBook(updated);
+        if (!_isAlive) return;
+      }
+
+      state = state.copyWith(
+        selectedBookIds: const <String>{},
+        isSelectionMode: false,
+      );
+      await refresh();
+    } catch (error) {
+      if (!_isAlive) return;
+      state = state.copyWith(errorMessage: _formatError(error));
+    }
+  }
+
+  /// Toggles or explicitly sets multi-book selection mode.
+  void toggleSelectionMode([bool? enabled]) {
+    if (!_isAlive) return;
+    final next = enabled ?? !state.isSelectionMode;
+    state = state.copyWith(
+      isSelectionMode: next,
+      selectedBookIds: next ? state.selectedBookIds : const <String>{},
+    );
+  }
+
+  /// Toggles selection of [bookId] in multi-select mode.
+  void toggleBookSelection(String bookId) {
+    if (!_isAlive) return;
+    final next = Set<String>.from(state.selectedBookIds);
+    if (!next.add(bookId)) {
+      next.remove(bookId);
+    }
+    state = state.copyWith(
+      isSelectionMode: true,
+      selectedBookIds: next,
+    );
+  }
+
+  /// Selects all books currently visible under active group/search filters.
+  void selectAllVisible() {
+    if (!_isAlive) return;
+    final visibleIds = state.filteredBooks.map((b) => b.id).toSet();
+    state = state.copyWith(
+      isSelectionMode: true,
+      selectedBookIds: visibleIds,
+    );
+  }
+
+  /// Exits multi-select mode and clears selected book IDs.
+  void clearSelection() {
+    if (!_isAlive) return;
+    state = state.copyWith(
+      isSelectionMode: false,
+      selectedBookIds: const <String>{},
+    );
+  }
+
   /// Toggles the pinned status of [bookId] and persists it immediately.
   Future<void> togglePin(String bookId) async {
     if (!_isAlive) return;
@@ -179,12 +400,46 @@ class BookshelfController extends Notifier<BookshelfState> {
     }
   }
 
-  /// Removes [bookId] from the bookshelf and refreshes the list.
-  Future<void> deleteBook(String bookId) async {
+  /// Removes [bookId] from the bookshelf, optionally clearing cached chapters.
+  Future<void> deleteBook(
+    String bookId, {
+    bool deleteCachedChapters = false,
+  }) {
+    return deleteBooks(
+      <String>[bookId],
+      deleteCachedChapters: deleteCachedChapters,
+    );
+  }
+
+  /// Removes all [bookIds] from the bookshelf, optionally clearing cached
+  /// chapters via [ChapterCacheGateway.deleteBookCache].
+  Future<void> deleteBooks(
+    Iterable<String> bookIds, {
+    bool deleteCachedChapters = false,
+  }) async {
     if (!_isAlive) return;
+    final ids = bookIds.toSet();
+    if (ids.isEmpty) return;
+
     final bookRepo = ref.read(bookRepositoryProvider);
+    final cacheGateway = ref.read(chapterCacheGatewayProvider);
     try {
-      await bookRepo.deleteBook(bookId);
+      for (final id in ids) {
+        if (deleteCachedChapters) {
+          await cacheGateway.deleteBookCache(id);
+          if (!_isAlive) return;
+        }
+        await bookRepo.deleteBook(id);
+        if (!_isAlive) return;
+      }
+
+      final remainingSelected = Set<String>.from(state.selectedBookIds)
+        ..removeAll(ids);
+      state = state.copyWith(
+        selectedBookIds: remainingSelected,
+        isSelectionMode:
+            remainingSelected.isNotEmpty ? state.isSelectionMode : false,
+      );
       await refresh();
     } catch (error) {
       if (!_isAlive) return;
@@ -192,13 +447,14 @@ class BookshelfController extends Notifier<BookshelfState> {
     }
   }
 
-  /// Opens the native multi-select TXT file picker and imports selected books.
-  Future<void> importLocalTxtFiles() async {
+  /// Opens the native multi-select `.txt` / `.epub` file picker and imports
+  /// selected books.
+  Future<void> importLocalBookFiles() async {
     if (!_isAlive || state.isImporting) return;
     final platform = ref.read(platformBridgeProvider);
     try {
       final paths = await platform.pickFiles(
-        extensions: const <String>['txt'],
+        extensions: const <String>['txt', 'epub'],
         allowMultiple: true,
       );
       if (!_isAlive || paths.isEmpty) return;
@@ -212,14 +468,19 @@ class BookshelfController extends Notifier<BookshelfState> {
     }
   }
 
-  /// Imports one or more local TXT files at [filePaths] via
-  /// [txtBookImporterProvider] and persists them to [BookRepository].
+  /// Backward-compatible alias for [importLocalBookFiles].
+  Future<void> importLocalTxtFiles() => importLocalBookFiles();
+
+  /// Imports one or more local `.txt` or `.epub` files at [filePaths] via
+  /// [txtBookImporterProvider] / [epubBookImporterProvider] and persists them
+  /// to [BookRepository].
   Future<void> importFilePaths(
     List<String> filePaths, {
     String? forcedEncoding,
   }) async {
     if (!_isAlive || filePaths.isEmpty) return;
-    final importer = ref.read(txtBookImporterProvider);
+    final txtImporter = ref.read(txtBookImporterProvider);
+    final epubImporter = ref.read(epubBookImporterProvider);
     final bookRepo = ref.read(bookRepositoryProvider);
 
     state = state.copyWith(
@@ -238,10 +499,21 @@ class BookshelfController extends Notifier<BookshelfState> {
       if (!_isAlive) return;
       final filePath = filePaths[i];
       try {
-        final imported = await importer(
-          filePath,
-          forcedEncoding: forcedEncoding,
-        );
+        final ext = p.extension(filePath).trim().toLowerCase();
+        final ({Book book, List<ChapterMeta> chapters}) imported;
+        if (ext == '.epub') {
+          imported = await epubImporter(filePath);
+        } else if (ext == '.txt' || ext.isEmpty) {
+          imported = await txtImporter(
+            filePath,
+            forcedEncoding: forcedEncoding,
+          );
+        } else {
+          throw FileAccessFailure(
+            message: '不支持的本地文件格式（仅支持 .txt / .epub）：${p.basename(filePath)}',
+            filePath: filePath,
+          );
+        }
         if (!_isAlive) return;
         final existing = await bookRepo.getBookById(imported.book.id);
         if (!_isAlive) return;
@@ -254,6 +526,7 @@ class BookshelfController extends Notifier<BookshelfState> {
                 lastChapterTitle: existing.lastChapterTitle.isNotEmpty
                     ? existing.lastChapterTitle
                     : imported.book.lastChapterTitle,
+                coverPath: imported.book.coverPath ?? existing.coverPath,
               );
         await bookRepo.saveBook(bookToSave);
         if (!_isAlive) return;
@@ -527,6 +800,16 @@ class BookshelfController extends Notifier<BookshelfState> {
           if (titleCmp != 0) return titleCmp;
           return b.updatedAt.compareTo(a.updatedAt);
       }
+    });
+    return sorted;
+  }
+
+  static List<BookGroup> _sortGroups(List<BookGroup> groups) {
+    final sorted = List<BookGroup>.from(groups);
+    sorted.sort((a, b) {
+      final orderCmp = a.sortOrder.compareTo(b.sortOrder);
+      if (orderCmp != 0) return orderCmp;
+      return a.createdAt.compareTo(b.createdAt);
     });
     return sorted;
   }

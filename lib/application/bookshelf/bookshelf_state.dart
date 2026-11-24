@@ -6,9 +6,16 @@ enum BookshelfViewMode { grid, list }
 /// Sort order options for bookshelf entries (pinned books always stay on top).
 enum BookshelfSortMode { recentRead, updatedAt, title }
 
+/// Sentinel filter ID representing ungrouped books (`book.groupId == null`).
+const String kUngroupedBookGroupFilterId = '__ungrouped__';
+
 /// Immutable state managed by [BookshelfController].
 class BookshelfState {
   final List<Book> books;
+  final List<BookGroup> groups;
+  final String? selectedGroupId;
+  final Set<String> selectedBookIds;
+  final bool isSelectionMode;
   final Map<String, ReadingProgress> progressByBookId;
   final BookshelfViewMode viewMode;
   final BookshelfSortMode sortMode;
@@ -24,6 +31,10 @@ class BookshelfState {
 
   const BookshelfState({
     this.books = const <Book>[],
+    this.groups = const <BookGroup>[],
+    this.selectedGroupId,
+    this.selectedBookIds = const <String>{},
+    this.isSelectionMode = false,
     this.progressByBookId = const <String, ReadingProgress>{},
     this.viewMode = BookshelfViewMode.grid,
     this.sortMode = BookshelfSortMode.recentRead,
@@ -39,19 +50,31 @@ class BookshelfState {
   });
 
   List<Book> get filteredBooks {
+    Iterable<Book> result = books;
+    if (selectedGroupId == kUngroupedBookGroupFilterId) {
+      result = result.where((book) => book.groupId == null);
+    } else if (selectedGroupId != null) {
+      result = result.where((book) => book.groupId == selectedGroupId);
+    }
+
     final query = searchQuery.trim().toLowerCase();
-    if (query.isEmpty) return books;
-    return books
-        .where(
-          (book) =>
-              book.title.toLowerCase().contains(query) ||
-              book.author.toLowerCase().contains(query),
-        )
-        .toList(growable: false);
+    if (query.isNotEmpty) {
+      result = result.where(
+        (book) =>
+            book.title.toLowerCase().contains(query) ||
+            book.author.toLowerCase().contains(query),
+      );
+    }
+    return result.toList(growable: false);
   }
 
   BookshelfState copyWith({
     List<Book>? books,
+    List<BookGroup>? groups,
+    String? selectedGroupId,
+    bool clearSelectedGroup = false,
+    Set<String>? selectedBookIds,
+    bool? isSelectionMode,
     Map<String, ReadingProgress>? progressByBookId,
     BookshelfViewMode? viewMode,
     BookshelfSortMode? sortMode,
@@ -70,6 +93,12 @@ class BookshelfState {
   }) {
     return BookshelfState(
       books: books ?? this.books,
+      groups: groups ?? this.groups,
+      selectedGroupId: clearSelectedGroup
+          ? null
+          : (selectedGroupId ?? this.selectedGroupId),
+      selectedBookIds: selectedBookIds ?? this.selectedBookIds,
+      isSelectionMode: isSelectionMode ?? this.isSelectionMode,
       progressByBookId: progressByBookId ?? this.progressByBookId,
       viewMode: viewMode ?? this.viewMode,
       sortMode: sortMode ?? this.sortMode,

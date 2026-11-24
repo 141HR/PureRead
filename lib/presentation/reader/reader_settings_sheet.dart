@@ -218,12 +218,15 @@ class ReaderSettingsSheet extends StatelessWidget {
                 ],
               ),
               const SizedBox(height: 12),
-              Row(
+              Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
                   Text('翻页模式', style: theme.textTheme.labelLarge),
-                  const SizedBox(width: 12),
-                  Expanded(
+                  const SizedBox(height: 8),
+                  SizedBox(
+                    width: double.infinity,
                     child: SegmentedButton<PageTurnMode>(
+                      showSelectedIcon: false,
                       segments: const <ButtonSegment<PageTurnMode>>[
                         ButtonSegment<PageTurnMode>(
                           value: PageTurnMode.none,
@@ -238,15 +241,15 @@ class ReaderSettingsSheet extends StatelessWidget {
                           label: Text('覆盖'),
                         ),
                         ButtonSegment<PageTurnMode>(
+                          value: PageTurnMode.simulation,
+                          label: Text('仿真'),
+                        ),
+                        ButtonSegment<PageTurnMode>(
                           value: PageTurnMode.scroll,
                           label: Text('滚动'),
                         ),
                       ],
-                      selected: <PageTurnMode>{
-                        active.pageTurnMode == PageTurnMode.simulation
-                            ? PageTurnMode.cover
-                            : active.pageTurnMode,
-                      },
+                      selected: <PageTurnMode>{active.pageTurnMode},
                       onSelectionChanged: (values) {
                         if (values.isNotEmpty) {
                           onUpdateTheme(
@@ -256,6 +259,15 @@ class ReaderSettingsSheet extends StatelessWidget {
                       },
                     ),
                   ),
+                  if (active.pageTurnMode == PageTurnMode.simulation) ...[
+                    const SizedBox(height: 6),
+                    Text(
+                      '仿真卷页：支持随指尖弯曲卷起、光泽折痕阴影与高帧率物理回弹',
+                      style: theme.textTheme.bodySmall?.copyWith(
+                        color: theme.colorScheme.onSurfaceVariant,
+                      ),
+                    ),
+                  ],
                 ],
               ),
               const SizedBox(height: 12),

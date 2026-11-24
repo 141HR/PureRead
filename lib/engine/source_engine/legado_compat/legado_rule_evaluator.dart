@@ -402,22 +402,16 @@ class LegadoRuleEvaluator {
         case _SelectorStage(:final rule):
           final nextValues = <String>[];
           for (final currentInput in values) {
-            final bareGet = _tryResolveBareGetRule(rule, activeSession);
-            if (bareGet != null) {
-              if (bareGet.isNotEmpty) nextValues.add(bareGet);
-              continue;
-            }
-            final resolvedRule = await _resolveMustacheInRule(
-              rule,
-              input: currentInput,
-              baseUrl: baseUrl,
-              keyword: keyword,
-              page: page,
-              session: activeSession,
-              cancelToken: cancelToken,
-            );
             nextValues.addAll(
-              LegadoSelectorEngine.selectValues(currentInput, resolvedRule),
+              await _evaluateSelectorStageList(
+                currentInput,
+                rule,
+                baseUrl: baseUrl,
+                keyword: keyword,
+                page: page,
+                session: activeSession,
+                cancelToken: cancelToken,
+              ),
             );
           }
           values = nextValues;
@@ -492,23 +486,40 @@ class LegadoRuleEvaluator {
         session: activeSession,
         cancelToken: cancelToken,
       );
-      final resolved = await _resolveMustacheInRule(
-        cleaned,
-        input: input,
-        baseUrl: baseUrl,
-        keyword: keyword,
-        page: page,
-        session: activeSession,
-        cancelToken: cancelToken,
-      );
+      final regexGroups = LegadoSelectorEngine.decodeRegexMatch(input);
+      final String resultStr;
+      if (regexGroups != null) {
+        resultStr = await _evaluateRegexMatchedOne(
+          regexGroups,
+          input,
+          cleaned,
+          baseUrl: baseUrl,
+          keyword: keyword,
+          page: page,
+          session: activeSession,
+          joinSeparator: joinSeparator,
+          cancelToken: cancelToken,
+        );
+      } else {
+        final resolved = await _resolveMustacheInRule(
+          cleaned,
+          input: input,
+          baseUrl: baseUrl,
+          keyword: keyword,
+          page: page,
+          session: activeSession,
+          cancelToken: cancelToken,
+        );
+        resultStr = LegadoSelectorEngine.selectOne(
+          input,
+          resolved,
+          joinSeparator: joinSeparator,
+        );
+      }
       if (httpClient != null) {
         await activeSession.flushCookies(httpClient!);
       }
-      return LegadoSelectorEngine.selectOne(
-        input,
-        resolved,
-        joinSeparator: joinSeparator,
-      );
+      return resultStr;
     }
 
     final list = await evaluateList(
@@ -686,6 +697,272 @@ class LegadoRuleEvaluator {
     return out.trim();
   }
 
+  Future<List<String>> _evaluateSelectorStageList(
+    String currentInput,
+    String rule, {
+    required String baseUrl,
+    String? keyword,
+    int? page,
+    required LegadoEvalSession session,
+    CancellationToken? cancelToken,
+  }) async {
+    final bareGet = _tryResolveBareGetRule(rule, session);
+    if (bareGet != null) {
+      return bareGet.isEmpty ? const <String>[] : <String>[bareGet];
+    }
+    final regexGroups = LegadoSelectorEngine.decodeRegexMatch(currentInput);
+    if (regexGroups != null) {
+      return _evaluateRegexMatchedList(
+        regexGroups,
+        currentInput,
+        rule,
+        baseUrl: baseUrl,
+        keyword: keyword,
+        page: page,
+        session: session,
+        cancelToken: cancelToken,
+      );
+    }
+    final resolvedRule = await _resolveMustacheInRule(
+      rule,
+      input: currentInput,
+      baseUrl: baseUrl,
+      keyword: keyword,
+      page: page,
+      session: session,
+      cancelToken: cancelToken,
+    );
+    return LegadoSelectorEngine.selectValues(currentInput, resolvedRule);
+  }
+
+  Future<String> _evaluateRegexMatchedOne(
+    List<String> regexGroups,
+    String envelopeInput,
+    String rule, {
+    required String baseUrl,
+    String? keyword,
+    int? page,
+    required LegadoEvalSession session,
+    required String joinSeparator,
+    CancellationToken? cancelToken,
+  }) async {
+    final trimmed = rule.trim();
+    if (trimmed.isEmpty) return '';
+
+    final orParts = LegadoSelectorEngine.splitTopLevel(trimmed, '||');
+    if (orParts.length > 1) {
+      for (final branch in orParts) {
+        final val = await _evaluateRegexMatchedOne(
+          regexGroups,
+          envelopeInput,
+          branch,
+          baseUrl: baseUrl,
+          keyword: keyword,
+          page: page,
+          session: session,
+          joinSeparator: joinSeparator,
+          cancelToken: cancelToken,
+        );
+        if (val.isNotEmpty) return val;
+      }
+      return '';
+    }
+
+    final andParts = LegadoSelectorEngine.splitTopLevel(trimmed, '&&');
+    if (andParts.length > 1) {
+      final combined = <String>[];
+      for (final branch in andParts) {
+        final vals = await _evaluateRegexMatchedList(
+          regexGroups,
+          envelopeInput,
+          branch,
+          baseUrl: baseUrl,
+          keyword: keyword,
+          page: page,
+          session: session,
+          cancelToken: cancelToken,
+        );
+        combined.addAll(vals.where((v) => v.isNotEmpty));
+      }
+      return combined.join(joinSeparator);
+    }
+
+    final vals = await _evaluateRegexMatchedList(
+      regexGroups,
+      envelopeInput,
+      trimmed,
+      baseUrl: baseUrl,
+      keyword: keyword,
+      page: page,
+      session: session,
+      cancelToken: cancelToken,
+    );
+    return vals.isEmpty ? '' : vals.first;
+  }
+
+  Future<List<String>> _evaluateRegexMatchedList(
+    List<String> regexGroups,
+    String envelopeInput,
+    String rule, {
+    required String baseUrl,
+    String? keyword,
+    int? page,
+    required LegadoEvalSession session,
+    CancellationToken? cancelToken,
+  }) async {
+    final trimmed = rule.trim();
+    if (trimmed.isEmpty) return const <String>[];
+
+    final orParts = LegadoSelectorEngine.splitTopLevel(trimmed, '||');
+    if (orParts.length > 1) {
+      for (final part in orParts) {
+        final res = await _evaluateRegexMatchedList(
+          regexGroups,
+          envelopeInput,
+          part,
+          baseUrl: baseUrl,
+          keyword: keyword,
+          page: page,
+          session: session,
+          cancelToken: cancelToken,
+        );
+        if (res.isNotEmpty) return res;
+      }
+      return const <String>[];
+    }
+
+    final andParts = LegadoSelectorEngine.splitTopLevel(trimmed, '&&');
+    if (andParts.length > 1) {
+      final combined = <String>[];
+      for (final part in andParts) {
+        combined.addAll(
+          await _evaluateRegexMatchedList(
+            regexGroups,
+            envelopeInput,
+            part,
+            baseUrl: baseUrl,
+            keyword: keyword,
+            page: page,
+            session: session,
+            cancelToken: cancelToken,
+          ),
+        );
+      }
+      return combined;
+    }
+
+    final zipParts = LegadoSelectorEngine.splitTopLevel(trimmed, '%%');
+    if (zipParts.length > 1) {
+      final lists = <List<String>>[];
+      var maxLen = 0;
+      for (final part in zipParts) {
+        final res = await _evaluateRegexMatchedList(
+          regexGroups,
+          envelopeInput,
+          part,
+          baseUrl: baseUrl,
+          keyword: keyword,
+          page: page,
+          session: session,
+          cancelToken: cancelToken,
+        );
+        if (res.isNotEmpty) {
+          lists.add(res);
+          if (res.length > maxLen) maxLen = res.length;
+        }
+      }
+      if (lists.isEmpty) return const <String>[];
+      final zipped = <String>[];
+      for (var i = 0; i < maxLen; i++) {
+        for (final list in lists) {
+          if (i < list.length) zipped.add(list[i]);
+        }
+      }
+      return zipped;
+    }
+
+    return _evaluateRegexMatchedLeaf(
+      regexGroups,
+      envelopeInput,
+      trimmed,
+      baseUrl: baseUrl,
+      keyword: keyword,
+      page: page,
+      session: session,
+      cancelToken: cancelToken,
+    );
+  }
+
+  Future<List<String>> _evaluateRegexMatchedLeaf(
+    List<String> regexGroups,
+    String envelopeInput,
+    String branch, {
+    required String baseUrl,
+    String? keyword,
+    int? page,
+    required LegadoEvalSession session,
+    CancellationToken? cancelToken,
+  }) async {
+    final bareGet = _tryResolveBareGetRule(branch, session);
+    if (bareGet != null) {
+      return bareGet.isEmpty ? const <String>[] : <String>[bareGet];
+    }
+
+    final (:selectorPart, :regexSpec) =
+        LegadoSelectorEngine.splitTrailingRegex(branch);
+    final hasCaptureRef =
+        LegadoSelectorEngine.containsCaptureGroupRef(selectorPart);
+
+    if (hasCaptureRef || _isPureSingleMustache(selectorPart)) {
+      var value = await _resolveMustacheInRule(
+        selectorPart,
+        input: envelopeInput,
+        baseUrl: baseUrl,
+        keyword: keyword,
+        page: page,
+        session: session,
+        regexGroups: regexGroups,
+        expandCaptures: true,
+        cancelToken: cancelToken,
+      );
+      if (regexSpec.isNotEmpty) {
+        final resolvedRegexSpec = await _resolveMustacheInRule(
+          regexSpec,
+          input: envelopeInput,
+          baseUrl: baseUrl,
+          keyword: keyword,
+          page: page,
+          session: session,
+          regexGroups: regexGroups,
+          cancelToken: cancelToken,
+        );
+        value = LegadoSelectorEngine.applyRegexSpec(value, resolvedRegexSpec);
+      }
+      return value.isEmpty ? const <String>[] : <String>[value];
+    }
+
+    final resolvedBranch = await _resolveMustacheInRule(
+      branch,
+      input: envelopeInput,
+      baseUrl: baseUrl,
+      keyword: keyword,
+      page: page,
+      session: session,
+      regexGroups: regexGroups,
+      cancelToken: cancelToken,
+    );
+    return LegadoSelectorEngine.selectValues(envelopeInput, resolvedBranch);
+  }
+
+  static bool _isPureSingleMustache(String selectorPart) {
+    final trimmed = selectorPart.trim();
+    if (!trimmed.startsWith('{{') || !trimmed.endsWith('}}')) return false;
+    final matches = _findMustacheExpressions(trimmed);
+    return matches.length == 1 &&
+        matches.first.start == 0 &&
+        matches.first.end == trimmed.length;
+  }
+
   Future<String> _resolveMustacheInRule(
     String rule, {
     required String input,
@@ -693,10 +970,19 @@ class LegadoRuleEvaluator {
     String? keyword,
     int? page,
     required LegadoEvalSession session,
+    List<String>? regexGroups,
+    bool expandCaptures = false,
     CancellationToken? cancelToken,
   }) async {
+    String expandLiteral(String text) => expandCaptures && regexGroups != null
+        ? LegadoSelectorEngine.expandCaptureGroups(text, regexGroups)
+        : text;
+
     var out = rule;
-    if (page != null && out.contains('<') && out.contains(',')) {
+    if (!expandCaptures &&
+        page != null &&
+        out.contains('<') &&
+        out.contains(',')) {
       out = LegadoSelectorEngine.interpolateTemplate(out, page: page);
     }
     if (out.contains('{{') && out.contains('}}')) {
@@ -705,7 +991,7 @@ class LegadoRuleEvaluator {
         final buf = StringBuffer();
         var cursor = 0;
         for (final m in matches) {
-          buf.write(out.substring(cursor, m.start));
+          buf.write(expandLiteral(out.substring(cursor, m.start)));
           final expr = m.expr.trim();
           final replacement = await _evaluateMustacheExpression(
             expr,
@@ -714,19 +1000,27 @@ class LegadoRuleEvaluator {
             keyword: keyword,
             page: page,
             session: session,
+            regexGroups: regexGroups,
             cancelToken: cancelToken,
           );
           buf.write(replacement);
           cursor = m.end;
         }
-        buf.write(out.substring(cursor));
+        buf.write(expandLiteral(out.substring(cursor)));
         out = buf.toString();
+      } else {
+        out = expandLiteral(out);
       }
+    } else {
+      out = expandLiteral(out);
     }
-    if (out.contains(r'{$.') || out.contains('{@@')) {
+    if (!expandCaptures && (out.contains(r'{$.') || out.contains('{@@'))) {
+      final rawContext = (regexGroups != null && regexGroups.isNotEmpty)
+          ? regexGroups[0]
+          : input;
       out = LegadoSelectorEngine.interpolateTemplate(
         out,
-        contextInput: input,
+        contextInput: rawContext,
       );
     }
     return out;
@@ -776,14 +1070,31 @@ class LegadoRuleEvaluator {
     String? keyword,
     int? page,
     required LegadoEvalSession session,
+    List<String>? regexGroups,
     CancellationToken? cancelToken,
   }) async {
+    final effectiveInput = (regexGroups != null && regexGroups.isNotEmpty)
+        ? regexGroups[0]
+        : (LegadoSelectorEngine.decodeRegexMatch(input)?[0] ?? input);
+    final groups = regexGroups ?? LegadoSelectorEngine.decodeRegexMatch(input);
+
     if (expr == 'key') return keyword ?? '';
     if (expr == 'page') return (page ?? 1).toString();
     if (expr == 'baseUrl') return baseUrl;
-    if (expr == 'result') return input;
+    if (expr == 'result') return effectiveInput;
     if (expr == 'chapter.title') return session.chapterTitle;
     if (expr == 'book.name') return session.bookName;
+
+    if (groups != null) {
+      final captureMatch = RegExp(r'^\$\{?(\d+)\}?$').firstMatch(expr);
+      if (captureMatch != null) {
+        final idx = int.tryParse(captureMatch.group(1)!);
+        if (idx != null && idx >= 0 && idx < groups.length) {
+          return groups[idx];
+        }
+        return '';
+      }
+    }
 
     if (expr.startsWith(r'$.') ||
         expr.startsWith(r'$[') ||
@@ -791,13 +1102,16 @@ class LegadoRuleEvaluator {
       final clean = expr.toLowerCase().startsWith('@json:')
           ? expr.substring(6).trim()
           : expr;
-      return LegadoSelectorEngine.selectOne(input, clean);
+      return LegadoSelectorEngine.selectOne(effectiveInput, clean);
     }
     if (expr.startsWith('@@')) {
-      return LegadoSelectorEngine.selectOne(input, expr.substring(2).trim());
+      return LegadoSelectorEngine.selectOne(
+        effectiveInput,
+        expr.substring(2).trim(),
+      );
     }
     if (expr.toLowerCase().startsWith('@xpath:')) {
-      return LegadoSelectorEngine.selectOne(input, expr);
+      return LegadoSelectorEngine.selectOne(effectiveInput, expr);
     }
 
     final jsExpr = expr.toLowerCase().startsWith('@js:')
@@ -810,6 +1124,7 @@ class LegadoRuleEvaluator {
       keyword: keyword,
       page: page,
       session: session,
+      regexGroups: groups,
       cancelToken: cancelToken,
     );
   }
@@ -821,6 +1136,7 @@ class LegadoRuleEvaluator {
     String? keyword,
     int? page,
     required LegadoEvalSession session,
+    List<String>? regexGroups,
     CancellationToken? cancelToken,
   }) async {
     cancelToken?.throwIfCancelled();
@@ -830,7 +1146,12 @@ class LegadoRuleEvaluator {
     final rawSourceKey = src?.bookSourceUrl ?? baseUrl;
     final activeBaseUrl =
         SourceHttpClient.tryNormalizeHttpUri(baseUrl)?.toString() ?? baseUrl;
-    var currentContent = result;
+    final resolvedGroups =
+        regexGroups ?? LegadoSelectorEngine.decodeRegexMatch(result);
+    final effectiveResult = (resolvedGroups != null && resolvedGroups.isNotEmpty)
+        ? resolvedGroups[0]
+        : result;
+    var currentContent = effectiveResult;
 
     final syncHost = <String, HostSyncCallback>{
       'javaPut': (args) {
@@ -1053,6 +1374,14 @@ class LegadoRuleEvaluator {
         : '';
 
     final wrapped = '''
+function __normCryptoArg(v) {
+  if (v == null) return null;
+  if (Array.isArray(v)) return v;
+  if (typeof ArrayBuffer !== "undefined" && ArrayBuffer.isView(v)) {
+    return Array.from(v);
+  }
+  return String(v);
+}
 function __wrapResp(r) {
   const hdrs = (r && r.headers) ? r.headers : {};
   return {
@@ -1091,6 +1420,33 @@ const java = {
   md5Encode16: (s) => host.md5Encode16(s == null ? "" : String(s)),
   base64Encode: (s) => host.base64Encode(s == null ? "" : String(s)),
   base64Decode: (s) => host.base64Decode(s == null ? "" : String(s)),
+  strToBytes: (s) => host.strToBytes(s == null ? "" : String(s)),
+  base64DecodeToByteArray: (s) => host.base64DecodeBytes(s == null ? "" : String(s)),
+  hexDecodeToByteArray: (s) => host.hexDecodeBytes(s == null ? "" : String(s)),
+  aesBase64DecodeToString: (str, key, transformation, iv) => host.aesDecodeBase64(str == null ? "" : String(str), __normCryptoArg(key), transformation == null ? null : String(transformation), __normCryptoArg(iv)),
+  aesDecodeToString: (data, key, transformation, iv) => host.symmetricCrypto("decryptStr", transformation == null ? null : String(transformation), __normCryptoArg(key), __normCryptoArg(iv), __normCryptoArg(data)),
+  aesBase64Encode: (str, key, transformation, iv) => host.aesEncodeBase64(__normCryptoArg(str), __normCryptoArg(key), transformation == null ? null : String(transformation), __normCryptoArg(iv)),
+  aesEncodeToString: (str, key, transformation, iv) => host.aesEncodeBase64(__normCryptoArg(str), __normCryptoArg(key), transformation == null ? null : String(transformation), __normCryptoArg(iv)),
+  aesEncodeToBase64String: (str, key, transformation, iv) => host.aesEncodeBase64(__normCryptoArg(str), __normCryptoArg(key), transformation == null ? null : String(transformation), __normCryptoArg(iv)),
+  desEncodeToBase64String: (str, key, transformation, iv) => host.symmetricCrypto("encryptBase64", (transformation == null || String(transformation).trim() === "") ? ((iv != null && String(iv).length > 0) ? "DES/CBC/PKCS5Padding" : "DES/ECB/PKCS5Padding") : String(transformation), __normCryptoArg(key), __normCryptoArg(iv), __normCryptoArg(str)),
+  desBase64DecodeToString: (str, key, transformation, iv) => host.symmetricCrypto("decryptBase64Str", (transformation == null || String(transformation).trim() === "") ? ((iv != null && String(iv).length > 0) ? "DES/CBC/PKCS5Padding" : "DES/ECB/PKCS5Padding") : String(transformation), __normCryptoArg(key), __normCryptoArg(iv), str == null ? "" : String(str)),
+  createSymmetricCrypto: (transformation, key, iv) => {
+    const _t = transformation == null ? "AES/ECB/PKCS5Padding" : String(transformation);
+    const _k = __normCryptoArg(key);
+    const _iv = __normCryptoArg(iv);
+    host.symmetricCrypto("validate", _t, _k, _iv, null);
+    return {
+      decryptStr: (data) => host.symmetricCrypto("decryptStr", _t, _k, _iv, __normCryptoArg(data)),
+      decrypt: (data) => host.symmetricCrypto("decrypt", _t, _k, _iv, __normCryptoArg(data)),
+      decryptBase64Str: (data) => host.symmetricCrypto("decryptBase64Str", _t, _k, _iv, data == null ? "" : String(data)),
+      decryptHexStr: (data) => host.symmetricCrypto("decryptHexStr", _t, _k, _iv, data == null ? "" : String(data)),
+      decryptBase64: (data) => host.symmetricCrypto("decryptBase64", _t, _k, _iv, data == null ? "" : String(data)),
+      decryptHex: (data) => host.symmetricCrypto("decryptHex", _t, _k, _iv, data == null ? "" : String(data)),
+      encryptBase64: (str) => host.symmetricCrypto("encryptBase64", _t, _k, _iv, __normCryptoArg(str)),
+      encryptHex: (str) => host.symmetricCrypto("encryptHex", _t, _k, _iv, __normCryptoArg(str)),
+      encrypt: (str) => host.symmetricCrypto("encrypt", _t, _k, _iv, __normCryptoArg(str)),
+    };
+  },
   hexDecodeToString: (s) => host.javaHexDecodeToString(s == null ? "" : String(s)),
   encodeURI: (s, enc) => host.javaEncodeURI(s == null ? "" : String(s), enc == null ? null : String(enc)),
   decodeURI: (s) => host.javaDecodeURI(s == null ? "" : String(s)),
@@ -1125,26 +1481,33 @@ const source = {
 $jsLibPrefix$prepared
 ''';
 
+    final bindings = <String, Object?>{
+      'result': effectiveResult,
+      'baseUrl': activeBaseUrl,
+      'key': keyword ?? '',
+      'page': page ?? 1,
+      'book': <String, Object?>{
+        'name': session.bookName,
+        'bookUrl': session.bookUrl,
+        'tocUrl': session.tocUrl,
+        'variable': '',
+      },
+      'chapter': <String, Object?>{
+        'title': session.chapterTitle,
+        'url': session.chapterUrl,
+        'index': session.chapterIndex,
+      },
+    };
+    if (resolvedGroups != null) {
+      for (var idx = 0; idx < resolvedGroups.length; idx++) {
+        bindings['\$$idx'] = resolvedGroups[idx];
+      }
+    }
+
     try {
       final res = await runtime.evaluate(
         wrapped,
-        bindings: <String, Object?>{
-          'result': result,
-          'baseUrl': activeBaseUrl,
-          'key': keyword ?? '',
-          'page': page ?? 1,
-          'book': <String, Object?>{
-            'name': session.bookName,
-            'bookUrl': session.bookUrl,
-            'tocUrl': session.tocUrl,
-            'variable': '',
-          },
-          'chapter': <String, Object?>{
-            'title': session.chapterTitle,
-            'url': session.chapterUrl,
-            'index': session.chapterIndex,
-          },
-        },
+        bindings: bindings,
         timeout: jsTimeout,
         cancelToken: cancelToken,
       );

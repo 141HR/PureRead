@@ -20,8 +20,10 @@ typedef HostAsyncCallback = Future<Object?> Function(List<Object?> args);
 /// - Async host Promise bridging (`JSPromise.fromAsyncFunction`) with host-side
 ///   [Timer] + [qjs.JSInterruptHandle.requestInterrupt] guard
 /// - Cooperative [CancellationToken] via [qjs.JSInterruptHandle.requestInterrupt]
-/// - Built-in pure-Dart RFC1321 MD5 (`host.md5`, `host.md5Encode16`) & Base64
-///   (`host.base64Encode`, `host.base64Decode`, global `btoa`/`atob`) helpers
+/// - Built-in pure-Dart RFC1321 MD5 (`host.md5`, `host.md5Encode16`), Base64
+///   (`host.base64Encode`, `host.base64Decode`, global `btoa`/`atob`), and
+///   FIPS-197 AES / FIPS-46 DES symmetric crypto (`host.aesEncodeBase64`,
+///   `host.aesDecodeBase64`, `host.symmetricCrypto`) helpers
 class QjsSandboxRuntime implements JsRuntime {
   static const int defaultMemoryLimitBytes = 64 * 1024 * 1024;
   static const int defaultMaxStackSizeBytes = 512 * 1024;
@@ -373,6 +375,76 @@ class QjsSandboxRuntime implements JsRuntime {
       name: 'base64Decode',
     ).asValue;
 
+    hostObj['strToBytes'] = qjs.JSFunction.createFromHostFunction(
+      rt,
+      (innerRt, _, args) {
+        final input = args.isEmpty ? '' : _jsToString(innerRt, args.first);
+        return _dartToJs(innerRt, utf8.encode(input));
+      },
+      name: 'strToBytes',
+    ).asValue;
+
+    hostObj['base64DecodeBytes'] = qjs.JSFunction.createFromHostFunction(
+      rt,
+      (innerRt, _, args) => _runHostCrypto(innerRt, () {
+        final input = args.isEmpty ? '' : _jsToString(innerRt, args.first);
+        return JsCryptoHelpers.base64DecodeBytes(input);
+      }),
+      name: 'base64DecodeBytes',
+    ).asValue;
+
+    hostObj['hexDecodeBytes'] = qjs.JSFunction.createFromHostFunction(
+      rt,
+      (innerRt, _, args) => _runHostCrypto(innerRt, () {
+        final input = args.isEmpty ? '' : _jsToString(innerRt, args.first);
+        return JsCryptoHelpers.hexDecodeBytes(input);
+      }),
+      name: 'hexDecodeBytes',
+    ).asValue;
+
+    hostObj['aesEncodeBase64'] = qjs.JSFunction.createFromHostFunction(
+      rt,
+      (innerRt, _, args) => _runHostCrypto(
+        innerRt,
+        () => _evaluateAesHost(innerRt, args, encrypt: true, outputHex: false),
+      ),
+      name: 'aesEncodeBase64',
+    ).asValue;
+
+    hostObj['aesDecodeBase64'] = qjs.JSFunction.createFromHostFunction(
+      rt,
+      (innerRt, _, args) => _runHostCrypto(
+        innerRt,
+        () => _evaluateAesHost(innerRt, args, encrypt: false, outputHex: false),
+      ),
+      name: 'aesDecodeBase64',
+    ).asValue;
+
+    hostObj['aesEncodeHex'] = qjs.JSFunction.createFromHostFunction(
+      rt,
+      (innerRt, _, args) => _runHostCrypto(
+        innerRt,
+        () => _evaluateAesHost(innerRt, args, encrypt: true, outputHex: true),
+      ),
+      name: 'aesEncodeHex',
+    ).asValue;
+
+    hostObj['aesDecodeHex'] = qjs.JSFunction.createFromHostFunction(
+      rt,
+      (innerRt, _, args) => _runHostCrypto(
+        innerRt,
+        () => _evaluateAesHost(innerRt, args, encrypt: false, outputHex: true),
+      ),
+      name: 'aesDecodeHex',
+    ).asValue;
+
+    hostObj['symmetricCrypto'] = qjs.JSFunction.createFromHostFunction(
+      rt,
+      (innerRt, _, args) =>
+          _runHostCrypto(innerRt, () => _evaluateSymmetricHost(innerRt, args)),
+      name: 'symmetricCrypto',
+    ).asValue;
+
     for (final entry in _syncHostFunctions.entries) {
       hostObj[entry.key] = qjs.JSFunction.createFromHostFunction(
         rt,
@@ -403,6 +475,173 @@ class QjsSandboxRuntime implements JsRuntime {
     }
 
     rt.global['host'] = hostObj.asValue;
+  }
+
+  static qjs.JSValue _runHostCrypto(
+    qjs.JSRuntime rt,
+    Object? Function() action,
+  ) {
+    try {
+      return _dartToJs(rt, action());
+    } on Object catch (e) {
+      throw qjs.JSException(qjs.JSError.create(rt, e.toString()));
+    }
+  }
+
+  static Object? _evaluateAesHost(
+    qjs.JSRuntime rt,
+    List<qjs.JSValue> args, {
+    required bool encrypt,
+    required bool outputHex,
+  }) {
+    final dataArg = args.isNotEmpty ? _jsToDart(rt, args[0]) : '';
+    final keyArg = args.length > 1 ? _jsToDart(rt, args[1]) : null;
+    final rawTransformation = args.length > 2
+        ? _jsToOptionalString(rt, args[2])
+        : null;
+    final ivArg = args.length > 3 ? _jsToDart(rt, args[3]) : null;
+
+    if (keyArg == null) {
+      throw ArgumentError('AES key must not be null or undefined.');
+    }
+
+    final keyBytes = JsCryptoHelpers.coerceBytes(keyArg, name: 'key');
+    final ivBytes = ivArg == null
+        ? null
+        : JsCryptoHelpers.coerceBytes(ivArg, name: 'iv');
+    final spec = SymmetricTransformation.parse(
+      rawTransformation,
+      defaultAlgorithm: SymmetricAlgorithm.aes,
+      hasNonEmptyIv: ivBytes != null && ivBytes.isNotEmpty,
+    );
+    if (spec.algorithm != SymmetricAlgorithm.aes) {
+      throw ArgumentError.value(
+        rawTransformation,
+        'transformation',
+        'AES helper requires an AES transformation.',
+      );
+    }
+    final transformation = spec.canonical;
+
+    if (encrypt) {
+      final plainBytes = JsCryptoHelpers.coerceBytes(dataArg, name: 'data');
+      final cipher = JsCryptoHelpers.encryptSymmetric(
+        data: plainBytes,
+        key: keyBytes,
+        transformation: transformation,
+        iv: ivBytes,
+      );
+      return outputHex ? JsCryptoHelpers.hexEncode(cipher) : base64Encode(cipher);
+    }
+
+    final Uint8List cipherBytes;
+    if (dataArg is List || dataArg is Map || dataArg is Uint8List) {
+      cipherBytes = JsCryptoHelpers.coerceBytes(dataArg, name: 'data');
+    } else {
+      final text = (dataArg ?? '').toString();
+      cipherBytes = outputHex
+          ? JsCryptoHelpers.hexDecodeBytes(text)
+          : JsCryptoHelpers.base64DecodeBytes(text);
+    }
+    final plain = JsCryptoHelpers.decryptSymmetric(
+      data: cipherBytes,
+      key: keyBytes,
+      transformation: transformation,
+      iv: ivBytes,
+    );
+    return utf8.decode(plain, allowMalformed: true);
+  }
+
+  static Object? _evaluateSymmetricHost(
+    qjs.JSRuntime rt,
+    List<qjs.JSValue> args,
+  ) {
+    final op = args.isNotEmpty ? _jsToString(rt, args[0]) : '';
+    final rawTransformation = args.length > 1
+        ? _jsToOptionalString(rt, args[1])
+        : null;
+    final keyArg = args.length > 2 ? _jsToDart(rt, args[2]) : null;
+    final ivArg = args.length > 3 ? _jsToDart(rt, args[3]) : null;
+    final dataArg = args.length > 4 ? _jsToDart(rt, args[4]) : null;
+
+    if (keyArg == null) {
+      throw ArgumentError('Symmetric cipher key must not be null or undefined.');
+    }
+
+    final keyBytes = JsCryptoHelpers.coerceBytes(keyArg, name: 'key');
+    final ivBytes = ivArg == null
+        ? null
+        : JsCryptoHelpers.coerceBytes(ivArg, name: 'iv');
+    final spec = SymmetricTransformation.parse(
+      rawTransformation,
+      defaultAlgorithm: SymmetricAlgorithm.aes,
+      hasNonEmptyIv: ivBytes != null && ivBytes.isNotEmpty,
+    );
+    final transformation = spec.canonical;
+    JsCryptoHelpers.validateSymmetricConfig(
+      key: keyBytes,
+      transformation: transformation,
+      iv: ivBytes,
+    );
+
+    if (op == 'validate') {
+      return true;
+    }
+
+    if (op == 'encryptBase64' || op == 'encryptHex' || op == 'encrypt') {
+      final cipher = JsCryptoHelpers.encryptSymmetric(
+        data: JsCryptoHelpers.coerceBytes(dataArg, name: 'data'),
+        key: keyBytes,
+        transformation: transformation,
+        iv: ivBytes,
+      );
+      return switch (op) {
+        'encryptBase64' => base64Encode(cipher),
+        'encryptHex' => JsCryptoHelpers.hexEncode(cipher),
+        _ => cipher,
+      };
+    }
+
+    final Uint8List cipherBytes;
+    switch (op) {
+      case 'decrypt':
+      case 'decryptStr':
+        cipherBytes = JsCryptoHelpers.decodeCiphertextInput(
+          dataArg,
+          blockSize: spec.blockSize,
+        );
+      case 'decryptBase64Str':
+      case 'decryptBase64':
+        cipherBytes = _isByteContainer(dataArg)
+            ? JsCryptoHelpers.coerceBytes(dataArg, name: 'data')
+            : JsCryptoHelpers.base64DecodeBytes((dataArg ?? '').toString());
+      case 'decryptHexStr':
+      case 'decryptHex':
+        cipherBytes = _isByteContainer(dataArg)
+            ? JsCryptoHelpers.coerceBytes(dataArg, name: 'data')
+            : JsCryptoHelpers.hexDecodeBytes((dataArg ?? '').toString());
+      default:
+        throw ArgumentError.value(op, 'op', 'Unsupported symmetricCrypto op.');
+    }
+
+    final plain = JsCryptoHelpers.decryptSymmetric(
+      data: cipherBytes,
+      key: keyBytes,
+      transformation: transformation,
+      iv: ivBytes,
+    );
+    final wantsBytes =
+        op == 'decrypt' || op == 'decryptBase64' || op == 'decryptHex';
+    return wantsBytes ? plain : utf8.decode(plain, allowMalformed: true);
+  }
+
+  static bool _isByteContainer(Object? value) =>
+      value is List || value is Map || value is Uint8List;
+
+  static String? _jsToOptionalString(qjs.JSRuntime rt, qjs.JSValue value) {
+    if (value.isUndefined || value.isNull) return null;
+    final text = _jsToString(rt, value).trim();
+    return text.isEmpty ? null : text;
   }
 
   static bool _isPromiseLike(qjs.JSValue value) {

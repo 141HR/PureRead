@@ -1,12 +1,15 @@
 import 'dart:collection';
 import 'dart:math' as math;
+import 'dart:typed_data';
+import 'dart:ui' as ui;
 
 import 'package:flutter/rendering.dart';
 
 import '../../domain/domain.dart';
 
 /// CustomPainter rendering one [PageSlice] (single-column) or a paired spread
-/// `(P_{2k}, P_{2k+1})` (two-column), with theme background, CJK-ASCII `0.2em`
+/// `(P_{2k}, P_{2k+1})` (two-column), with theme background, subtle procedural
+/// paper-grain texture, 2-column book-spine shadow, CJK-ASCII `0.2em`
 /// micro-spacing (or exact [LayoutLine.charXOffsets]), and optional canvas
 /// header/footer lines.
 class ReaderPagePainter extends CustomPainter {
@@ -22,6 +25,8 @@ class ReaderPagePainter extends CustomPainter {
     this.footerLeftText,
     this.footerRightText,
     this.contentTopOffset = 0.0,
+    this.enablePaperGrain = true,
+    this.enableSpineShadow = true,
   });
 
   final PaginationConfig config;
@@ -35,17 +40,34 @@ class ReaderPagePainter extends CustomPainter {
   final String? footerLeftText;
   final String? footerRightText;
   final double contentTopOffset;
+  final bool enablePaperGrain;
+  final bool enableSpineShadow;
 
   static final _GlyphPainterCache _glyphCache = _GlyphPainterCache();
+  static final _PaperGrainBuffers _paperGrain = _PaperGrainBuffers.generate();
+  static final _SpineShaderCache _spineShaderCache = _SpineShaderCache();
+
+  static final Paint _bgPaint = Paint();
+  static final Paint _warmGrainPaint = Paint()
+    ..strokeWidth = 1.0
+    ..strokeCap = ui.StrokeCap.round;
+  static final Paint _coolGrainPaint = Paint()
+    ..strokeWidth = 1.0
+    ..strokeCap = ui.StrokeCap.round;
+  static final Paint _fiberPaint = Paint()
+    ..strokeWidth = 0.65
+    ..style = PaintingStyle.stroke;
+  static final Paint _spineShadowPaint = Paint();
+  static final Paint _dividerPaint = Paint()..strokeWidth = 1.0;
 
   @override
   void paint(Canvas canvas, Size size) {
     if (backgroundColor != null) {
-      canvas.drawRect(
-        Offset.zero & size,
-        Paint()..color = backgroundColor!,
-      );
+      _bgPaint.color = backgroundColor!;
+      canvas.drawRect(Offset.zero & size, _bgPaint);
     }
+
+    _paintPaperGrain(canvas, size);
 
     final effectiveFontFamily =
         (config.fontFamily == 'system' || config.fontFamily.isEmpty)
@@ -90,13 +112,12 @@ class ReaderPagePainter extends CustomPainter {
       }
 
       final dividerX = leftOriginX + config.columnWidth + config.columnGap / 2;
-      final linePaint = Paint()
-        ..color = dividerColor ?? secondaryTextColor.withAlpha(46)
-        ..strokeWidth = 1.0;
+      _paintSpineShadow(canvas, size, dividerX: dividerX);
+      _dividerPaint.color = dividerColor ?? secondaryTextColor.withAlpha(46);
       canvas.drawLine(
         Offset(dividerX, topY),
         Offset(dividerX, topY + config.columnHeight),
-        linePaint,
+        _dividerPaint,
       );
 
       if (rightPage != null) {
@@ -149,6 +170,101 @@ class ReaderPagePainter extends CustomPainter {
         ),
       );
     }
+  }
+
+  void _paintPaperGrain(Canvas canvas, Size size) {
+    if (!enablePaperGrain ||
+        backgroundColor == null ||
+        !size.width.isFinite ||
+        !size.height.isFinite ||
+        size.width <= 0.0 ||
+        size.height <= 0.0) {
+      return;
+    }
+
+    final luminance = backgroundColor!.computeLuminance();
+    if (luminance < 0.02) {
+      _warmGrainPaint.color = const Color(0x05FFFFFF);
+      _coolGrainPaint.color = const Color(0x03D8D0C0);
+      _fiberPaint.color = const Color(0x04FFFFFF);
+    } else if (luminance < 0.3) {
+      _warmGrainPaint.color = const Color(0x08FFF6E5);
+      _coolGrainPaint.color = const Color(0x0A000000);
+      _fiberPaint.color = const Color(0x06FFFFFF);
+    } else {
+      _warmGrainPaint.color = const Color(0x0B8C6D46);
+      _coolGrainPaint.color = const Color(0x082A3442);
+      _fiberPaint.color = const Color(0x06705C42);
+    }
+
+    const tile = _PaperGrainBuffers.tileSize;
+    final cols = (size.width / tile).ceil().clamp(0, 24);
+    final rows = (size.height / tile).ceil().clamp(0, 24);
+    if (cols == 0 || rows == 0) return;
+
+    canvas.save();
+    canvas.clipRect(Offset.zero & size);
+    var curX = 0.0;
+    var curY = 0.0;
+    for (var row = 0; row < rows; row++) {
+      final ty = row * tile;
+      for (var col = 0; col < cols; col++) {
+        final tx = col * tile;
+        final dx = tx - curX;
+        final dy = ty - curY;
+        if (dx != 0.0 || dy != 0.0) {
+          canvas.translate(dx, dy);
+          curX = tx;
+          curY = ty;
+        }
+        canvas.drawRawPoints(
+          ui.PointMode.points,
+          _paperGrain.warmSpecks,
+          _warmGrainPaint,
+        );
+        canvas.drawRawPoints(
+          ui.PointMode.points,
+          _paperGrain.coolSpecks,
+          _coolGrainPaint,
+        );
+        canvas.drawRawPoints(
+          ui.PointMode.lines,
+          _paperGrain.fiberLines,
+          _fiberPaint,
+        );
+      }
+    }
+    canvas.restore();
+  }
+
+  void _paintSpineShadow(
+    Canvas canvas,
+    Size size, {
+    required double dividerX,
+  }) {
+    if (!enableSpineShadow ||
+        config.columnCount != 2 ||
+        !size.width.isFinite ||
+        !size.height.isFinite ||
+        size.width <= 0.0 ||
+        size.height <= 0.0) {
+      return;
+    }
+
+    final halfWidth = math.max(18.0, config.columnGap * 0.92).clamp(16.0, 44.0);
+    final isDark = (backgroundColor?.computeLuminance() ?? 1.0) < 0.3;
+    final leftX = dividerX - halfWidth;
+    final rightX = dividerX + halfWidth;
+
+    _spineShadowPaint.shader = _spineShaderCache.obtain(
+      leftX: leftX,
+      rightX: rightX,
+      isDark: isDark,
+    );
+    canvas.drawRect(
+      Rect.fromLTWH(leftX, 0.0, halfWidth * 2.0, size.height),
+      _spineShadowPaint,
+    );
   }
 
   void _paintSlice(
@@ -380,7 +496,122 @@ class ReaderPagePainter extends CustomPainter {
         oldDelegate.headerText != headerText ||
         oldDelegate.footerLeftText != footerLeftText ||
         oldDelegate.footerRightText != footerRightText ||
-        oldDelegate.contentTopOffset != contentTopOffset;
+        oldDelegate.contentTopOffset != contentTopOffset ||
+        oldDelegate.enablePaperGrain != enablePaperGrain ||
+        oldDelegate.enableSpineShadow != enableSpineShadow;
+  }
+}
+
+class _PaperGrainBuffers {
+  const _PaperGrainBuffers({
+    required this.warmSpecks,
+    required this.coolSpecks,
+    required this.fiberLines,
+  });
+
+  static const double tileSize = 192.0;
+
+  final Float32List warmSpecks;
+  final Float32List coolSpecks;
+  final Float32List fiberLines;
+
+  static _PaperGrainBuffers generate() {
+    var seed = 0x50757265;
+    double nextUnit() {
+      seed = (seed * 1664525 + 1013904223) & 0xFFFFFFFF;
+      return seed / 4294967296.0;
+    }
+
+    const speckCount = 220;
+    final warm = Float32List(speckCount * 2);
+    final cool = Float32List(speckCount * 2);
+    for (var i = 0; i < speckCount; i++) {
+      warm[i * 2] = nextUnit() * tileSize;
+      warm[i * 2 + 1] = nextUnit() * tileSize;
+      cool[i * 2] = nextUnit() * tileSize;
+      cool[i * 2 + 1] = nextUnit() * tileSize;
+    }
+
+    const fiberCount = 44;
+    final fibers = Float32List(fiberCount * 4);
+    for (var i = 0; i < fiberCount; i++) {
+      final x = nextUnit() * tileSize;
+      final y = nextUnit() * tileSize;
+      final angle = (nextUnit() - 0.5) * math.pi;
+      final len = 4.0 + nextUnit() * 6.0;
+      fibers[i * 4] = x;
+      fibers[i * 4 + 1] = y;
+      fibers[i * 4 + 2] = x + math.cos(angle) * len;
+      fibers[i * 4 + 3] = y + math.sin(angle) * len;
+    }
+
+    return _PaperGrainBuffers(
+      warmSpecks: warm,
+      coolSpecks: cool,
+      fiberLines: fibers,
+    );
+  }
+}
+
+class _SpineShaderCache {
+  double? _lastLeftX;
+  double? _lastRightX;
+  bool? _lastIsDark;
+  ui.Shader? _lastShader;
+
+  static const List<Color> _lightColors = <Color>[
+    Color(0x00000000),
+    Color(0x0C241B10),
+    Color(0x201E160D),
+    Color(0x2A1A120A),
+    Color(0x161E160D),
+    Color(0x06FFFFFF),
+    Color(0x00000000),
+  ];
+
+  static const List<Color> _darkColors = <Color>[
+    Color(0x00000000),
+    Color(0x1A000000),
+    Color(0x3A000000),
+    Color(0x48000000),
+    Color(0x22000000),
+    Color(0x0BFFFFFF),
+    Color(0x00000000),
+  ];
+
+  static const List<double> _stops = <double>[
+    0.0,
+    0.28,
+    0.44,
+    0.50,
+    0.58,
+    0.74,
+    1.0,
+  ];
+
+  ui.Shader obtain({
+    required double leftX,
+    required double rightX,
+    required bool isDark,
+  }) {
+    final cached = _lastShader;
+    if (cached != null &&
+        _lastLeftX == leftX &&
+        _lastRightX == rightX &&
+        _lastIsDark == isDark) {
+      return cached;
+    }
+    final shader = ui.Gradient.linear(
+      Offset(leftX, 0.0),
+      Offset(rightX, 0.0),
+      isDark ? _darkColors : _lightColors,
+      _stops,
+    );
+    _lastLeftX = leftX;
+    _lastRightX = rightX;
+    _lastIsDark = isDark;
+    _lastShader = shader;
+    return shader;
   }
 }
 
