@@ -7,6 +7,11 @@ import '../../domain/domain.dart';
 
 const double _kSettingsTwoColumnBreakpoint = 820.0;
 
+String _displayFileName(String rawPath) {
+  final normalized = rawPath.replaceAll(r'\', '/');
+  return p.posix.basename(normalized);
+}
+
 /// Adaptive PureRead settings, local `.pureread.zip` backup/restore, database
 /// snapshot viewer, cache manager, theme/font entry, and GPL-3.0 About page.
 class SettingsPage extends ConsumerWidget {
@@ -462,7 +467,7 @@ class _SnapshotsSectionCard extends StatelessWidget {
                       color: theme.colorScheme.primary,
                     ),
                     title: Text(
-                      p.basename(snapshots[i]),
+                      _displayFileName(snapshots[i]),
                       maxLines: 1,
                       overflow: TextOverflow.ellipsis,
                     ),
@@ -751,7 +756,7 @@ class _RestorePreviewDialog extends StatelessWidget {
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
               Text(
-                p.basename(archivePath),
+                _displayFileName(archivePath),
                 style: theme.textTheme.titleSmall?.copyWith(
                   fontWeight: FontWeight.w600,
                 ),
