@@ -1,8 +1,11 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:pureread/application/core_providers.dart';
 import 'package:pureread/application/m2_providers.dart';
+import 'package:pureread/application/source_lab/source_health_checker.dart';
 import 'package:pureread/domain/domain.dart';
 import 'package:pureread/engine/source_engine/sanitizer/sanitizer.dart';
 import 'package:pureread/presentation/sources/sources_page.dart';
@@ -140,7 +143,7 @@ class _SourcesPageBookRepo implements BookRepository {
 }
 
 class _SourcesPageProvider implements BookProvider {
-  _SourcesPageProvider(this.providerId, this._now);
+  _SourcesPageProvider(this._now, {this.providerId = ''});
 
   @override
   final String providerId;
@@ -250,13 +253,40 @@ class _SourcesPageProvider implements BookProvider {
 }
 
 class _SourcesPageFactoryGateway implements BookProviderFactoryGateway {
-  _SourcesPageFactoryGateway(this._now);
+  _SourcesPageFactoryGateway(this._now, {this.onSearch});
 
   final DateTime _now;
+  final Future<({List<BookSearchItem> items, SourceDebugTrace trace})> Function(
+    BookSource source,
+    String keyword,
+    CancellationToken? cancelToken,
+  )?
+  onSearch;
 
   @override
-  BookProvider createProvider(BookSource source) =>
-      _SourcesPageProvider(source.id, _now);
+  BookProvider createProvider(BookSource source) => onSearch == null
+      ? _SourcesPageProvider(_now, providerId: source.id)
+      : _CallbackSearchProvider(source, _now, onSearch!);
+}
+
+class _CallbackSearchProvider extends _SourcesPageProvider {
+  _CallbackSearchProvider(this._source, DateTime now, this._onSearch)
+    : super(now, providerId: _source.id);
+
+  final BookSource _source;
+  final Future<({List<BookSearchItem> items, SourceDebugTrace trace})> Function(
+    BookSource source,
+    String keyword,
+    CancellationToken? cancelToken,
+  )
+  _onSearch;
+
+  @override
+  Future<({List<BookSearchItem> items, SourceDebugTrace trace})> search(
+    String keyword, {
+    int page = 1,
+    CancellationToken? cancelToken,
+  }) => _onSearch(_source, keyword, cancelToken);
 }
 
 void main() {
@@ -433,6 +463,262 @@ void main() {
 
       expect(find.text('书源2'), findsOneWidget);
       expect(find.text('书源3'), findsNothing);
+    },
+  );
+
+  testWidgets(
+    'SourcesPage runs batch health check with live progress, filters by health status, disables and deletes failed sources with confirmation',
+    (tester) async {
+      tester.view.devicePixelRatio = 1.0;
+      tester.view.physicalSize = const Size(1280, 800);
+      addTearDown(tester.view.reset);
+
+      final sourceRepo = _SourcesPageSourceRepo();
+      await sourceRepo.saveSources(<BookSource>[
+        BookSource(
+          id: 'src_ok',
+          name: '正常书源',
+          groupName: '精品',
+          engineType: SourceEngineType.legado,
+          baseUrl: 'https://ok.example.com',
+          rawDefinition: '{}',
+          createdAt: now,
+          updatedAt: now,
+        ),
+        BookSource(
+          id: 'src_fail',
+          name: '报错书源',
+          groupName: '精品',
+          engineType: SourceEngineType.legado,
+          baseUrl: 'https://fail.example.com',
+          rawDefinition: '{}',
+          createdAt: now,
+          updatedAt: now,
+        ),
+        BookSource(
+          id: 'src_timeout',
+          name: '超时书源',
+          groupName: '精品',
+          engineType: SourceEngineType.legado,
+          baseUrl: 'https://slow.example.com',
+          rawDefinition: '{}',
+          createdAt: now,
+          updatedAt: now,
+        ),
+        BookSource(
+          id: 'src_disabled',
+          name: '禁用书源',
+          groupName: '精品',
+          engineType: SourceEngineType.legado,
+          baseUrl: 'https://disabled.example.com',
+          rawDefinition: '{}',
+          enabled: false,
+          createdAt: now,
+          updatedAt: now,
+        ),
+      ]);
+
+      final searchGate = Completer<void>();
+
+      await tester.pumpWidget(
+        ProviderScope(
+          overrides: [
+            sourceRepositoryProvider.overrideWithValue(sourceRepo),
+            bookRepositoryProvider.overrideWithValue(_SourcesPageBookRepo()),
+            healthCheckConcurrencyProvider.overrideWithValue(2),
+            healthCheckTimeoutProvider.overrideWithValue(
+              const Duration(milliseconds: 80),
+            ),
+            bookProviderFactoryProvider.overrideWithValue(
+              _SourcesPageFactoryGateway(
+                now,
+                onSearch: (source, keyword, cancelToken) async {
+                  if (source.id == 'src_ok') {
+                    await searchGate.future;
+                    return (
+                      items: <BookSearchItem>[
+                        BookSearchItem(
+                          sourceId: source.id,
+                          providerType: ProviderType.legado,
+                          bookUrl: 'https://ok.example.com/1',
+                          title: keyword,
+                        ),
+                      ],
+                      trace: const SourceDebugTrace(
+                        step: 'search',
+                        elapsedMs: 5,
+                        httpStatus: 200,
+                      ),
+                    );
+                  }
+                  if (source.id == 'src_fail') {
+                    throw SourceParseFailure(
+                      message: 'HTTP 404 Not Found',
+                      sourceId: source.id,
+                      step: 'search',
+                    );
+                  }
+                  // src_timeout hangs past 80ms timeout.
+                  final cancelCompleter = Completer<void>();
+                  cancelToken?.addListener(() {
+                    if (!cancelCompleter.isCompleted) {
+                      cancelCompleter.completeError(const CancelledFailure());
+                    }
+                  });
+                  await cancelCompleter.future;
+                  throw const CancelledFailure();
+                },
+              ),
+            ),
+          ],
+          child: const MaterialApp(home: SourcesPage()),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      // Initially 4 unchecked sources.
+      expect(find.text('未测 (4)'), findsOneWidget);
+      expect(find.text('批量测活'), findsOneWidget);
+
+      await tester.tap(find.text('批量测活'));
+      await tester.pump();
+
+      // Live progress bar & stop button shown while searchGate is open.
+      expect(find.text('停止测活'), findsOneWidget);
+      expect(find.textContaining('测活进度'), findsOneWidget);
+
+      // Release healthy source and let timeout finish.
+      searchGate.complete();
+      await tester.pump(const Duration(milliseconds: 120));
+      await tester.pumpAndSettle();
+
+      expect(find.text('批量测活'), findsOneWidget);
+      expect(find.text('正常 (1)'), findsOneWidget);
+      expect(find.text('失效 (2)'), findsOneWidget);
+      expect(find.text('未测 (0)'), findsOneWidget);
+      expect(find.text('超时'), findsOneWidget);
+      expect(find.text('异常'), findsOneWidget);
+      expect(find.text('暂不支持'), findsOneWidget);
+      expect(find.text('HTTP 404 Not Found'), findsOneWidget);
+
+      // Filter by failedOnly.
+      await tester.tap(find.text('失效 (2)'));
+      await tester.pumpAndSettle();
+      expect(find.text('报错书源'), findsOneWidget);
+      expect(find.text('超时书源'), findsOneWidget);
+      expect(find.text('正常书源'), findsNothing);
+
+      // Filter by okOnly.
+      await tester.tap(find.text('正常 (1)'));
+      await tester.pumpAndSettle();
+      expect(find.text('正常书源'), findsOneWidget);
+      expect(find.text('报错书源'), findsNothing);
+
+      // Reset to all health states.
+      await tester.tap(find.text('全部状态'));
+      await tester.pumpAndSettle();
+
+      // Disable failed sources.
+      await tester.tap(find.text('禁用失效源'));
+      await tester.pumpAndSettle();
+      expect(sourceRepo.sources['src_fail']?.enabled, isFalse);
+      expect(sourceRepo.sources['src_timeout']?.enabled, isFalse);
+      expect(sourceRepo.sources['src_ok']?.enabled, isTrue);
+
+      // Delete failed sources requires confirmation dialog.
+      await tester.tap(find.text('清理失效源'));
+      await tester.pumpAndSettle();
+      expect(find.text('清理失效书源'), findsOneWidget);
+
+      // Cancel preserves failed sources.
+      await tester.tap(find.text('取消'));
+      await tester.pumpAndSettle();
+      expect(sourceRepo.sources.containsKey('src_fail'), isTrue);
+
+      // Confirm deletion removes only failed sources.
+      await tester.tap(find.text('清理失效源'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('确认删除'));
+      await tester.pumpAndSettle();
+
+      expect(sourceRepo.sources.containsKey('src_fail'), isFalse);
+      expect(sourceRepo.sources.containsKey('src_timeout'), isFalse);
+      expect(sourceRepo.sources.containsKey('src_ok'), isTrue);
+      expect(sourceRepo.sources.containsKey('src_disabled'), isTrue);
+    },
+  );
+
+  testWidgets(
+    'SourcesPage stops active batch health check and renders health controls on mobile without overflow',
+    (tester) async {
+      tester.view.devicePixelRatio = 1.0;
+      tester.view.physicalSize = const Size(400, 800);
+      addTearDown(tester.view.reset);
+
+      final sourceRepo = _SourcesPageSourceRepo();
+      await sourceRepo.saveSources(<BookSource>[
+        BookSource(
+          id: 'm1',
+          name: '移动端源1',
+          groupName: '默认',
+          engineType: SourceEngineType.legado,
+          baseUrl: 'https://m1.example.com',
+          rawDefinition: '{}',
+          lastCheckStatus: SourceCheckStatus.error,
+          lastErrorSummary: '连接失败',
+          createdAt: now,
+          updatedAt: now,
+        ),
+        BookSource(
+          id: 'm2',
+          name: '移动端源2',
+          groupName: '默认',
+          engineType: SourceEngineType.legado,
+          baseUrl: 'https://m2.example.com',
+          rawDefinition: '{}',
+          createdAt: now,
+          updatedAt: now,
+        ),
+      ]);
+
+      await tester.pumpWidget(
+        ProviderScope(
+          overrides: [
+            sourceRepositoryProvider.overrideWithValue(sourceRepo),
+            bookRepositoryProvider.overrideWithValue(_SourcesPageBookRepo()),
+            bookProviderFactoryProvider.overrideWithValue(
+              _SourcesPageFactoryGateway(
+                now,
+                onSearch: (source, keyword, cancelToken) async {
+                  final cancelCompleter = Completer<void>();
+                  cancelToken?.addListener(() {
+                    if (!cancelCompleter.isCompleted) {
+                      cancelCompleter.completeError(const CancelledFailure());
+                    }
+                  });
+                  await cancelCompleter.future;
+                  throw const CancelledFailure();
+                },
+              ),
+            ),
+          ],
+          child: const MaterialApp(home: SourcesPage()),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      expect(find.text('失效 (1)'), findsOneWidget);
+      expect(find.text('禁用失效源'), findsOneWidget);
+      expect(find.text('清理失效源'), findsOneWidget);
+
+      await tester.tap(find.text('批量测活'));
+      await tester.pump();
+      expect(find.text('停止测活'), findsOneWidget);
+
+      await tester.tap(find.text('停止测活'));
+      await tester.pumpAndSettle();
+      expect(find.text('批量测活'), findsOneWidget);
+      expect(find.textContaining('已停止测活'), findsOneWidget);
     },
   );
 }

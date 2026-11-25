@@ -3,15 +3,24 @@ import '../../domain/domain.dart';
 /// Filter option for source enablement status.
 enum SourceEnabledFilter { all, enabledOnly, disabledOnly }
 
+/// Filter option for source health check status.
+enum SourceHealthFilter { all, okOnly, failedOnly, uncheckedOnly }
+
 /// Immutable state managed by [SourcesController].
 class SourcesState {
   final List<BookSource> sources;
   final String selectedGroup;
   final String searchQuery;
   final SourceEnabledFilter enabledFilter;
+  final SourceHealthFilter healthFilter;
   final Set<String> selectedIds;
   final bool isLoading;
   final bool isImporting;
+  final bool isCheckingHealth;
+  final int healthCheckedCount;
+  final int healthTotalCount;
+  final int healthOkCount;
+  final int healthFailedCount;
   final String? statusMessage;
   final String? errorMessage;
 
@@ -20,9 +29,15 @@ class SourcesState {
     this.selectedGroup = '全部',
     this.searchQuery = '',
     this.enabledFilter = SourceEnabledFilter.all,
+    this.healthFilter = SourceHealthFilter.all,
     this.selectedIds = const <String>{},
     this.isLoading = false,
     this.isImporting = false,
+    this.isCheckingHealth = false,
+    this.healthCheckedCount = 0,
+    this.healthTotalCount = 0,
+    this.healthOkCount = 0,
+    this.healthFailedCount = 0,
     this.statusMessage,
     this.errorMessage,
   });
@@ -82,6 +97,33 @@ class SourcesState {
     return groupCounts[groupName] ?? 0;
   }
 
+  /// Count of sources whose last health check failed or timed out.
+  int get failedCount {
+    var count = 0;
+    for (final s in sources) {
+      if (s.lastCheckStatus == SourceCheckStatus.error) count++;
+    }
+    return count;
+  }
+
+  /// Count of sources whose last health check succeeded.
+  int get okCount {
+    var count = 0;
+    for (final s in sources) {
+      if (s.lastCheckStatus == SourceCheckStatus.ok) count++;
+    }
+    return count;
+  }
+
+  /// Count of sources not yet health-checked.
+  int get uncheckedCount {
+    var count = 0;
+    for (final s in sources) {
+      if (s.lastCheckStatus == SourceCheckStatus.unknown) count++;
+    }
+    return count;
+  }
+
   /// Filtered and weight-sorted visible book sources.
   List<BookSource> get filteredSources {
     final q = searchQuery.trim().toLowerCase();
@@ -98,6 +140,16 @@ class SourcesState {
           if (!source.enabled) return false;
         case SourceEnabledFilter.disabledOnly:
           if (source.enabled) return false;
+      }
+      switch (healthFilter) {
+        case SourceHealthFilter.all:
+          break;
+        case SourceHealthFilter.okOnly:
+          if (source.lastCheckStatus != SourceCheckStatus.ok) return false;
+        case SourceHealthFilter.failedOnly:
+          if (source.lastCheckStatus != SourceCheckStatus.error) return false;
+        case SourceHealthFilter.uncheckedOnly:
+          if (source.lastCheckStatus != SourceCheckStatus.unknown) return false;
       }
       if (q.isNotEmpty) {
         final matchesName = source.name.toLowerCase().contains(q);
@@ -121,9 +173,15 @@ class SourcesState {
     String? selectedGroup,
     String? searchQuery,
     SourceEnabledFilter? enabledFilter,
+    SourceHealthFilter? healthFilter,
     Set<String>? selectedIds,
     bool? isLoading,
     bool? isImporting,
+    bool? isCheckingHealth,
+    int? healthCheckedCount,
+    int? healthTotalCount,
+    int? healthOkCount,
+    int? healthFailedCount,
     String? statusMessage,
     bool clearStatus = false,
     String? errorMessage,
@@ -134,9 +192,15 @@ class SourcesState {
       selectedGroup: selectedGroup ?? this.selectedGroup,
       searchQuery: searchQuery ?? this.searchQuery,
       enabledFilter: enabledFilter ?? this.enabledFilter,
+      healthFilter: healthFilter ?? this.healthFilter,
       selectedIds: selectedIds ?? this.selectedIds,
       isLoading: isLoading ?? this.isLoading,
       isImporting: isImporting ?? this.isImporting,
+      isCheckingHealth: isCheckingHealth ?? this.isCheckingHealth,
+      healthCheckedCount: healthCheckedCount ?? this.healthCheckedCount,
+      healthTotalCount: healthTotalCount ?? this.healthTotalCount,
+      healthOkCount: healthOkCount ?? this.healthOkCount,
+      healthFailedCount: healthFailedCount ?? this.healthFailedCount,
       statusMessage: clearStatus
           ? null
           : (statusMessage ?? this.statusMessage),

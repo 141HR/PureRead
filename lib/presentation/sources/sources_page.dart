@@ -91,7 +91,36 @@ class _SourcesManageTabState extends ConsumerState<_SourcesManageTab> {
 
   @override
   Widget build(BuildContext context) {
-    final state = ref.watch(sourcesControllerProvider);
+    final selected = ref.watch(
+      sourcesControllerProvider.select(
+        (s) => (
+          sources: s.sources,
+          selectedGroup: s.selectedGroup,
+          searchQuery: s.searchQuery,
+          enabledFilter: s.enabledFilter,
+          healthFilter: s.healthFilter,
+          selectedIds: s.selectedIds,
+          isLoading: s.isLoading,
+          isImporting: s.isImporting,
+          isCheckingHealth: s.isCheckingHealth,
+          statusMessage: s.statusMessage,
+          errorMessage: s.errorMessage,
+        ),
+      ),
+    );
+    final state = SourcesState(
+      sources: selected.sources,
+      selectedGroup: selected.selectedGroup,
+      searchQuery: selected.searchQuery,
+      enabledFilter: selected.enabledFilter,
+      healthFilter: selected.healthFilter,
+      selectedIds: selected.selectedIds,
+      isLoading: selected.isLoading,
+      isImporting: selected.isImporting,
+      isCheckingHealth: selected.isCheckingHealth,
+      statusMessage: selected.statusMessage,
+      errorMessage: selected.errorMessage,
+    );
     final controller = ref.read(sourcesControllerProvider.notifier);
     final theme = Theme.of(context);
     final visibleSources = state.filteredSources;
@@ -150,10 +179,25 @@ class _SourcesManageTabState extends ConsumerState<_SourcesManageTab> {
                 icon: const Icon(Icons.ios_share_outlined, size: 18),
                 label: const Text('导出'),
               ),
+              if (state.isCheckingHealth)
+                FilledButton.tonalIcon(
+                  onPressed: controller.cancelBatchHealthCheck,
+                  icon: const Icon(Icons.stop_circle_outlined, size: 18),
+                  label: const Text('停止测活'),
+                )
+              else
+                OutlinedButton.icon(
+                  onPressed: state.isImporting || visibleSources.isEmpty
+                      ? null
+                      : () => unawaited(controller.startBatchHealthCheck()),
+                  icon: const Icon(Icons.health_and_safety_outlined, size: 18),
+                  label: const Text('批量测活'),
+                ),
             ],
           ),
         ),
         if (state.isImporting) const LinearProgressIndicator(minHeight: 2),
+        const _HealthCheckProgressBanner(),
         if (state.statusMessage != null || state.errorMessage != null)
           _InlineBanner(
             errorMessage: state.errorMessage,
@@ -164,6 +208,14 @@ class _SourcesManageTabState extends ConsumerState<_SourcesManageTab> {
           state: state,
           onSelectGroup: controller.selectGroup,
         ),
+        if (state.sources.isNotEmpty)
+          _SourceHealthFilterBar(
+            state: state,
+            onSelectFilter: controller.setHealthFilter,
+            onDisableFailed: () => unawaited(controller.disableFailedSources()),
+            onDeleteFailed: () =>
+                unawaited(_confirmDeleteFailedSources(controller, state.failedCount)),
+          ),
         if (state.selectedIds.isNotEmpty)
           Material(
             color: theme.colorScheme.primaryContainer.withAlpha(110),
@@ -295,6 +347,7 @@ class _SourcesManageTabState extends ConsumerState<_SourcesManageTab> {
         final source = visibleSources[index];
         final isSelected = state.selectedIds.contains(source.id);
         return Card(
+          key: ValueKey<String>(source.id),
           elevation: 0.5,
           child: Padding(
             padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
@@ -334,7 +387,10 @@ class _SourcesManageTabState extends ConsumerState<_SourcesManageTab> {
                                 source.groupName,
                                 theme.colorScheme.surfaceContainerHighest,
                               ),
-                              _CheckStatusChip(status: source.lastCheckStatus),
+                              _CheckStatusChip(
+                                status: source.lastCheckStatus,
+                                errorSummary: source.lastErrorSummary,
+                              ),
                             ],
                           ),
                           if (source.baseUrl.isNotEmpty) ...[
@@ -345,6 +401,23 @@ class _SourcesManageTabState extends ConsumerState<_SourcesManageTab> {
                               overflow: TextOverflow.ellipsis,
                               style: theme.textTheme.bodySmall?.copyWith(
                                 color: theme.colorScheme.onSurfaceVariant,
+                              ),
+                            ),
+                          ],
+                          if (source.lastCheckStatus != SourceCheckStatus.ok &&
+                              source.lastErrorSummary != null &&
+                              source.lastErrorSummary!.trim().isNotEmpty) ...[
+                            const SizedBox(height: 2),
+                            Text(
+                              source.lastErrorSummary!,
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                              style: theme.textTheme.bodySmall?.copyWith(
+                                color:
+                                    source.lastCheckStatus ==
+                                        SourceCheckStatus.error
+                                    ? theme.colorScheme.error
+                                    : theme.colorScheme.onSurfaceVariant,
                               ),
                             ),
                           ],
@@ -388,6 +461,37 @@ class _SourcesManageTabState extends ConsumerState<_SourcesManageTab> {
         );
       },
     );
+  }
+
+  Future<void> _confirmDeleteFailedSources(
+    SourcesController controller,
+    int failedCount,
+  ) async {
+    if (failedCount <= 0) return;
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        title: const Text('清理失效书源'),
+        content: Text('确定要永久删除全部 $failedCount 个失效书源吗？此操作不可撤销。'),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(dialogContext).pop(false),
+            child: const Text('取消'),
+          ),
+          FilledButton(
+            style: FilledButton.styleFrom(
+              backgroundColor: Theme.of(dialogContext).colorScheme.error,
+              foregroundColor: Theme.of(dialogContext).colorScheme.onError,
+            ),
+            onPressed: () => Navigator.of(dialogContext).pop(true),
+            child: const Text('确认删除'),
+          ),
+        ],
+      ),
+    );
+    if (confirmed == true && mounted) {
+      await controller.deleteFailedSources();
+    }
   }
 
   Future<void> _showPasteImportDialog() async {
@@ -1761,7 +1865,16 @@ class _SourceGroupFilterBarState extends State<_SourceGroupFilterBar> {
 
   @override
   Widget build(BuildContext context) {
-    final groups = widget.state.groups;
+    final groupCounts = widget.state.groupCounts;
+    final sorted = groupCounts.keys.toList()
+      ..sort((a, b) {
+        final countCmp = (groupCounts[b] ?? 0).compareTo(groupCounts[a] ?? 0);
+        if (countCmp != 0) return countCmp;
+        if (a == '默认' && b != '默认') return 1;
+        if (b == '默认' && a != '默认') return -1;
+        return a.compareTo(b);
+      });
+    final groups = <String>['全部', ...sorted];
     final selected = widget.state.selectedGroup;
     final displayGroups = <String>[
       if (groups.isNotEmpty) groups.first,
@@ -1801,7 +1914,9 @@ class _SourceGroupFilterBarState extends State<_SourceGroupFilterBar> {
                       separatorBuilder: (_, _) => const SizedBox(width: 6),
                       itemBuilder: (context, index) {
                         final group = displayGroups[index];
-                        final count = widget.state.countForGroup(group);
+                        final count = group == '全部'
+                            ? widget.state.sources.length
+                            : (groupCounts[group] ?? 0);
                         return ChoiceChip(
                           visualDensity: VisualDensity.compact,
                           materialTapTargetSize:
@@ -1992,17 +2107,183 @@ class _TagChip extends StatelessWidget {
   }
 }
 
-class _CheckStatusChip extends StatelessWidget {
-  final SourceCheckStatus status;
+class _HealthCheckProgressBanner extends ConsumerWidget {
+  const _HealthCheckProgressBanner();
 
-  const _CheckStatusChip({required this.status});
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final progress = ref.watch(
+      sourcesControllerProvider.select(
+        (s) => (
+          isChecking: s.isCheckingHealth,
+          checked: s.healthCheckedCount,
+          total: s.healthTotalCount,
+          ok: s.healthOkCount,
+          failed: s.healthFailedCount,
+        ),
+      ),
+    );
+    if (!progress.isChecking) {
+      return const SizedBox.shrink();
+    }
+    final theme = Theme.of(context);
+    final ratio = progress.total > 0
+        ? (progress.checked / progress.total).clamp(0.0, 1.0)
+        : null;
+    return Material(
+      color: theme.colorScheme.surfaceContainerLow,
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          LinearProgressIndicator(value: ratio, minHeight: 3),
+          Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 6),
+            child: Text(
+              '测活进度 ${progress.checked}/${progress.total} · 正常 ${progress.ok} · 失效 ${progress.failed}',
+              style: theme.textTheme.bodySmall?.copyWith(
+                color: theme.colorScheme.onSurfaceVariant,
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _SourceHealthFilterBar extends StatelessWidget {
+  final SourcesState state;
+  final void Function(SourceHealthFilter filter) onSelectFilter;
+  final VoidCallback onDisableFailed;
+  final VoidCallback onDeleteFailed;
+
+  const _SourceHealthFilterBar({
+    required this.state,
+    required this.onSelectFilter,
+    required this.onDisableFailed,
+    required this.onDeleteFailed,
+  });
 
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
+    var okCount = 0;
+    var failedCount = 0;
+    var uncheckedCount = 0;
+    for (final s in state.sources) {
+      switch (s.lastCheckStatus) {
+        case SourceCheckStatus.ok:
+          okCount++;
+        case SourceCheckStatus.error:
+          failedCount++;
+        case SourceCheckStatus.unknown:
+          uncheckedCount++;
+        case SourceCheckStatus.unsupported:
+          break;
+      }
+    }
+
+    return Column(
+      mainAxisSize: MainAxisSize.min,
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        Padding(
+          padding: const EdgeInsets.fromLTRB(16, 6, 16, 6),
+          child: Wrap(
+            spacing: 6,
+            runSpacing: 6,
+            crossAxisAlignment: WrapCrossAlignment.center,
+            children: [
+              ChoiceChip(
+                visualDensity: VisualDensity.compact,
+                materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                label: const Text('全部状态'),
+                selected: state.healthFilter == SourceHealthFilter.all,
+                onSelected: (_) => onSelectFilter(SourceHealthFilter.all),
+              ),
+              ChoiceChip(
+                visualDensity: VisualDensity.compact,
+                materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                label: Text('正常 ($okCount)'),
+                selected: state.healthFilter == SourceHealthFilter.okOnly,
+                onSelected: (_) => onSelectFilter(SourceHealthFilter.okOnly),
+              ),
+              ChoiceChip(
+                visualDensity: VisualDensity.compact,
+                materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                label: Text('失效 ($failedCount)'),
+                selected: state.healthFilter == SourceHealthFilter.failedOnly,
+                onSelected: (_) =>
+                    onSelectFilter(SourceHealthFilter.failedOnly),
+              ),
+              ChoiceChip(
+                visualDensity: VisualDensity.compact,
+                materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                label: Text('未测 ($uncheckedCount)'),
+                selected:
+                    state.healthFilter == SourceHealthFilter.uncheckedOnly,
+                onSelected: (_) =>
+                    onSelectFilter(SourceHealthFilter.uncheckedOnly),
+              ),
+              TextButton.icon(
+                style: TextButton.styleFrom(
+                  visualDensity: VisualDensity.compact,
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 10,
+                    vertical: 4,
+                  ),
+                ),
+                onPressed: failedCount > 0 && !state.isCheckingHealth
+                    ? onDisableFailed
+                    : null,
+                icon: const Icon(Icons.block_outlined, size: 16),
+                label: const Text('禁用失效源'),
+              ),
+              TextButton.icon(
+                style: TextButton.styleFrom(
+                  visualDensity: VisualDensity.compact,
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 10,
+                    vertical: 4,
+                  ),
+                  foregroundColor: theme.colorScheme.error,
+                ),
+                onPressed: failedCount > 0 && !state.isCheckingHealth
+                    ? onDeleteFailed
+                    : null,
+                icon: const Icon(Icons.delete_sweep_outlined, size: 16),
+                label: const Text('清理失效源'),
+              ),
+            ],
+          ),
+        ),
+        const Divider(height: 1),
+      ],
+    );
+  }
+}
+
+class _CheckStatusChip extends StatelessWidget {
+  final SourceCheckStatus status;
+  final String? errorSummary;
+
+  const _CheckStatusChip({required this.status, this.errorSummary});
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final isTimeout =
+        status == SourceCheckStatus.error &&
+        errorSummary != null &&
+        (errorSummary!.contains('超时') ||
+            errorSummary!.toLowerCase().contains('timeout'));
     final (label, color) = switch (status) {
       SourceCheckStatus.ok => ('正常', theme.colorScheme.primaryContainer),
-      SourceCheckStatus.error => ('异常', theme.colorScheme.errorContainer),
+      SourceCheckStatus.error => (
+        isTimeout ? '超时' : '异常',
+        theme.colorScheme.errorContainer,
+      ),
       SourceCheckStatus.unsupported => (
         '暂不支持',
         theme.colorScheme.tertiaryContainer,
