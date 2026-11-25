@@ -13,6 +13,48 @@ class LegadoCompatProvider implements BookProvider {
   final int? rateLimitMsOverride;
   final int maxTocPages;
   final int maxContentPages;
+  final Map<String, LegadoCacheEntry> _cacheEntries =
+      <String, LegadoCacheEntry>{};
+  final Map<String, String> _javaVars = <String, String>{};
+  final Map<String, String> _bookVars = <String, String>{};
+  String _sourceVariable = '';
+  String _bookVariable = '';
+  String _bookCustomVariable = '';
+  String _bookName = '';
+  String _bookUrl = '';
+  String _tocUrl = '';
+
+  LegadoEvalSession _createSession({
+    String? bookUrl,
+    String? tocUrl,
+    String chapterTitle = '',
+    String chapterUrl = '',
+    int chapterIndex = 0,
+  }) {
+    return LegadoEvalSession(
+      sourceVariable: _sourceVariable,
+      bookName: _bookName,
+      bookUrl: bookUrl ?? _bookUrl,
+      tocUrl: tocUrl ?? _tocUrl,
+      bookVariable: _bookVariable,
+      bookCustomVariable: _bookCustomVariable,
+      chapterTitle: chapterTitle,
+      chapterUrl: chapterUrl,
+      chapterIndex: chapterIndex,
+      javaVars: _javaVars,
+      bookVars: _bookVars,
+      cacheEntries: _cacheEntries,
+    );
+  }
+
+  void _syncSession(LegadoEvalSession session) {
+    _sourceVariable = session.sourceVariable;
+    _bookVariable = session.bookVariable;
+    _bookCustomVariable = session.bookCustomVariable;
+    if (session.bookName.isNotEmpty) _bookName = session.bookName;
+    if (session.bookUrl.isNotEmpty) _bookUrl = session.bookUrl;
+    if (session.tocUrl.isNotEmpty) _tocUrl = session.tocUrl;
+  }
 
   int get effectiveRateLimitMs => rateLimitMsOverride ?? source.rateLimitMs;
 
@@ -101,8 +143,16 @@ class LegadoCompatProvider implements BookProvider {
       );
     }
 
-    final session = LegadoEvalSession();
-    final baseHeaders = await evaluator.evaluateHeaders(
+    _javaVars.clear();
+    _bookVars.clear();
+    _bookVariable = '';
+    _bookCustomVariable = '';
+    _bookName = '';
+    _bookUrl = '';
+    _tocUrl = '';
+    final session = _createSession();
+    try {
+      final baseHeaders = await evaluator.evaluateHeaders(
       baseUrl: source.effectiveBaseUrl,
       session: session,
       cancelToken: cancelToken,
@@ -138,6 +188,32 @@ class LegadoCompatProvider implements BookProvider {
       cancelToken: cancelToken,
     );
     if (blocksRes.items.isEmpty) {
+      final redirected =
+          _canonicalUrlKey(resp.finalUrl) != _canonicalUrlKey(req.url);
+      if (redirected || source.ruleBookInfo.name.trim().isNotEmpty) {
+        final fallbackItem = await _tryExtractRedirectDetailSearchItem(
+          resp: resp,
+          keyword: keyword,
+          redirected: redirected,
+          session: session,
+          cancelToken: cancelToken,
+        );
+        if (fallbackItem != null) {
+          sw.stop();
+          return (
+            items: <BookSearchItem>[fallbackItem],
+            trace: SourceDebugTrace(
+              step: 'search',
+              elapsedMs: sw.elapsedMilliseconds,
+              httpStatus: resp.statusCode,
+              requestUrl: resp.finalUrl,
+              matchedPreview:
+                  '1 items via redirect/detail fallback (charset=${resp.detectedCharset}, first=${fallbackItem.title})',
+              logs: List<String>.unmodifiable(session.logs),
+            ),
+          );
+        }
+      }
       throw SourceParseFailure(
         message:
             'Legado ruleSearch.bookList matched 0 elements (${source.ruleSearch.bookList})',
@@ -243,7 +319,10 @@ class LegadoCompatProvider implements BookProvider {
         BookSearchItem(
           sourceId: providerId,
           providerType: type,
-          bookUrl: SourceHttpClient.resolveUrl(rawBookUrl, resp.finalUrl),
+          bookUrl: LegadoRuleEvaluator.resolveUrlSpec(
+            rawBookUrl,
+            resp.finalUrl,
+          ),
           title: title,
           author: author,
           coverUrl: coverUrl,
@@ -268,6 +347,9 @@ class LegadoCompatProvider implements BookProvider {
         logs: List<String>.unmodifiable(session.logs),
       ),
     );
+    } finally {
+      _syncSession(session);
+    }
   }
 
   @override
@@ -296,8 +378,9 @@ class LegadoCompatProvider implements BookProvider {
       source.ruleBookInfo.wordCount,
     ]);
 
-    final session = LegadoEvalSession(bookUrl: bookUrl);
-    final baseHeaders = await evaluator.evaluateHeaders(
+    final session = _createSession(bookUrl: bookUrl);
+    try {
+      final baseHeaders = await evaluator.evaluateHeaders(
       baseUrl: source.effectiveBaseUrl,
       session: session,
       cancelToken: cancelToken,
@@ -436,7 +519,9 @@ class LegadoCompatProvider implements BookProvider {
           );
     final tocUrl = rawTocUrl.isEmpty
         ? resp.finalUrl
-        : SourceHttpClient.resolveUrl(rawTocUrl, resp.finalUrl);
+        : LegadoRuleEvaluator.resolveUrlSpec(rawTocUrl, resp.finalUrl);
+    session.bookUrl = resp.finalUrl;
+    session.tocUrl = tocUrl;
 
     sw.stop();
     return (
@@ -462,6 +547,9 @@ class LegadoCompatProvider implements BookProvider {
         logs: List<String>.unmodifiable(session.logs),
       ),
     );
+    } finally {
+      _syncSession(session);
+    }
   }
 
   @override
@@ -483,10 +571,12 @@ class LegadoCompatProvider implements BookProvider {
       source.ruleToc.chapterName,
       source.ruleToc.chapterUrl,
       source.ruleToc.nextTocUrl,
+      source.ruleToc.preUpdateJs,
     ]);
 
-    final session = LegadoEvalSession(tocUrl: tocUrl);
-    final baseHeaders = await evaluator.evaluateHeaders(
+    final session = _createSession(tocUrl: tocUrl);
+    try {
+      final baseHeaders = await evaluator.evaluateHeaders(
       baseUrl: source.effectiveBaseUrl,
       session: session,
       cancelToken: cancelToken,
@@ -539,6 +629,22 @@ class LegadoCompatProvider implements BookProvider {
         visitedUrls.add(_canonicalUrlKey(resp.finalUrl));
       }
 
+      final preUpdateRaw = source.ruleToc.preUpdateJs.trim();
+      if (preUpdateRaw.isNotEmpty) {
+        final preUpdateRule =
+            preUpdateRaw.contains('<js>') ||
+                preUpdateRaw.toLowerCase().startsWith('@js:')
+            ? preUpdateRaw
+            : '@js:$preUpdateRaw';
+        await evaluator.evaluateString(
+          resp.body,
+          preUpdateRule,
+          baseUrl: resp.finalUrl,
+          session: session,
+          cancelToken: cancelToken,
+        );
+      }
+
       final blocksRes = await evaluator.evaluateListBlocks(
         resp.body,
         source.ruleToc.chapterList,
@@ -580,7 +686,7 @@ class LegadoCompatProvider implements BookProvider {
         if (title.isEmpty) continue;
         final resolvedUrl = rawUrl.isEmpty
             ? resp.finalUrl
-            : SourceHttpClient.resolveUrl(rawUrl, resp.finalUrl);
+            : LegadoRuleEvaluator.resolveUrlSpec(rawUrl, resp.finalUrl);
         chapters.add(
           ChapterMeta(
             bookId: firstFinalUrl,
@@ -604,7 +710,7 @@ class LegadoCompatProvider implements BookProvider {
         for (final rawNext in nextRawUrls) {
           final trimmedNext = rawNext.trim();
           if (trimmedNext.isEmpty) continue;
-          final resolvedNext = SourceHttpClient.resolveUrl(
+          final resolvedNext = LegadoRuleEvaluator.resolveUrlSpec(
             trimmedNext,
             resp.finalUrl,
           );
@@ -635,6 +741,9 @@ class LegadoCompatProvider implements BookProvider {
         logs: List<String>.unmodifiable(session.logs),
       ),
     );
+    } finally {
+      _syncSession(session);
+    }
   }
 
   @override
@@ -666,12 +775,13 @@ class LegadoCompatProvider implements BookProvider {
       source.ruleContent.replaceRegex,
     ]);
 
-    final session = LegadoEvalSession(
+    final session = _createSession(
       chapterTitle: chapter.title,
       chapterUrl: rawChapterUrl,
       chapterIndex: chapter.chapterIndex,
     );
-    final baseHeaders = await evaluator.evaluateHeaders(
+    try {
+      final baseHeaders = await evaluator.evaluateHeaders(
       baseUrl: source.effectiveBaseUrl,
       session: session,
       cancelToken: cancelToken,
@@ -743,7 +853,7 @@ class LegadoCompatProvider implements BookProvider {
         for (final rawNext in nextRawUrls) {
           final trimmedNext = rawNext.trim();
           if (trimmedNext.isEmpty) continue;
-          final resolvedNext = SourceHttpClient.resolveUrl(
+          final resolvedNext = LegadoRuleEvaluator.resolveUrlSpec(
             trimmedNext,
             resp.finalUrl,
           );
@@ -763,7 +873,10 @@ class LegadoCompatProvider implements BookProvider {
       final resolvedReplace = replaceRegexRaw
           .replaceAll('{{chapter.title}}', chapter.title)
           .replaceAll('{{book.name}}', session.bookName);
-      final spec = resolvedReplace.startsWith('##')
+      final lowerReplace = resolvedReplace.toLowerCase();
+      final isJsReplace =
+          lowerReplace.startsWith('@js:') || lowerReplace.startsWith('<js>');
+      final spec = (resolvedReplace.startsWith('##') || isJsReplace)
           ? resolvedReplace
           : '##$resolvedReplace';
       text = await evaluator.evaluateString(
@@ -803,6 +916,133 @@ class LegadoCompatProvider implements BookProvider {
         logs: List<String>.unmodifiable(session.logs),
       ),
     );
+    } finally {
+      _syncSession(session);
+    }
+  }
+
+  Future<BookSearchItem?> _tryExtractRedirectDetailSearchItem({
+    required HttpFetchResult resp,
+    required String keyword,
+    required bool redirected,
+    required LegadoEvalSession session,
+    CancellationToken? cancelToken,
+  }) async {
+    final infoRule = source.ruleBookInfo;
+    if (infoRule.webView) return null;
+    if (infoRule.name.trim().isEmpty && infoRule.init.trim().isEmpty) {
+      return null;
+    }
+
+    try {
+      var infoInput = resp.body;
+      if (infoRule.init.trim().isNotEmpty) {
+        final initVal = await evaluator.evaluateString(
+          infoInput,
+          infoRule.init,
+          baseUrl: resp.finalUrl,
+          session: session,
+          cancelToken: cancelToken,
+        );
+        if (initVal.isNotEmpty) {
+          infoInput = initVal;
+        }
+      }
+
+      final title = infoRule.name.trim().isEmpty
+          ? ''
+          : (await evaluator.evaluateString(
+              infoInput,
+              infoRule.name,
+              baseUrl: resp.finalUrl,
+              session: session,
+              cancelToken: cancelToken,
+            )).trim();
+      if (title.isEmpty) return null;
+
+      final author = infoRule.author.trim().isEmpty
+          ? ''
+          : (await evaluator.evaluateString(
+              infoInput,
+              infoRule.author,
+              baseUrl: resp.finalUrl,
+              session: session,
+              cancelToken: cancelToken,
+            )).trim();
+
+      final tocUrl = infoRule.tocUrl.trim().isEmpty
+          ? ''
+          : (await evaluator.evaluateString(
+              infoInput,
+              infoRule.tocUrl,
+              baseUrl: resp.finalUrl,
+              session: session,
+              cancelToken: cancelToken,
+            )).trim();
+
+      final matchedCondition =
+          redirected ||
+          (keyword.trim().isNotEmpty && title.contains(keyword.trim())) ||
+          tocUrl.isNotEmpty ||
+          author.isNotEmpty;
+      if (!matchedCondition) return null;
+
+      final coverUrl = infoRule.coverUrl.trim().isEmpty
+          ? null
+          : _resolveOptional(
+              await evaluator.evaluateString(
+                infoInput,
+                infoRule.coverUrl,
+                baseUrl: resp.finalUrl,
+                session: session,
+                cancelToken: cancelToken,
+              ),
+              resp.finalUrl,
+            );
+      final intro = infoRule.intro.trim().isEmpty
+          ? ''
+          : await evaluator.evaluateString(
+              infoInput,
+              infoRule.intro,
+              baseUrl: resp.finalUrl,
+              session: session,
+              cancelToken: cancelToken,
+            );
+      final lastChapter = infoRule.lastChapter.trim().isEmpty
+          ? ''
+          : await evaluator.evaluateString(
+              infoInput,
+              infoRule.lastChapter,
+              baseUrl: resp.finalUrl,
+              session: session,
+              cancelToken: cancelToken,
+            );
+      final kind = infoRule.kind.trim().isEmpty
+          ? null
+          : _nullableTrimmed(
+              await evaluator.evaluateString(
+                infoInput,
+                infoRule.kind,
+                baseUrl: resp.finalUrl,
+                session: session,
+                cancelToken: cancelToken,
+              ),
+            );
+
+      return BookSearchItem(
+        sourceId: providerId,
+        providerType: type,
+        bookUrl: resp.finalUrl,
+        title: title,
+        author: author,
+        coverUrl: coverUrl,
+        intro: intro,
+        latestChapterTitle: lastChapter,
+        kind: kind,
+      );
+    } on JsExecutionFailure {
+      return null;
+    }
   }
 
   static List<ChapterMeta> _reindexChapters(List<ChapterMeta> chapters) {

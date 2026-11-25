@@ -18,6 +18,7 @@ class HttpFetchResult {
   final String finalUrl;
   final String detectedCharset;
   final Map<String, String> headers;
+  final String? redirectLocation;
 
   const HttpFetchResult({
     required this.body,
@@ -25,6 +26,7 @@ class HttpFetchResult {
     required this.finalUrl,
     required this.detectedCharset,
     required this.headers,
+    this.redirectLocation,
   });
 }
 
@@ -366,13 +368,22 @@ class SourceHttpClient {
         }
       });
 
-      final finalUri = response.realUri.toString();
+      final redirectLocation =
+          flatHeaders['location'] ??
+          (response.redirects.isNotEmpty
+              ? response.redirects.first.location.toString()
+              : null);
+      final rawFinalUri = response.realUri.toString();
+      final finalUri = rawFinalUri.isEmpty
+          ? normalizedUri.toString()
+          : resolveUrl(rawFinalUri, normalizedUri.toString());
       return HttpFetchResult(
         body: decoded.text,
         statusCode: statusCode,
-        finalUrl: finalUri.isEmpty ? normalizedUri.toString() : finalUri,
+        finalUrl: finalUri,
         detectedCharset: decoded.charsetName,
         headers: flatHeaders,
+        redirectLocation: redirectLocation,
       );
     } on AppFailure {
       rethrow;

@@ -133,9 +133,20 @@ class SymmetricTransformation {
   }
 }
 
-/// Pure-Dart RFC 1321 MD5, Base64, Hex, FIPS-197 AES (128/192/256), and
-/// FIPS-46 DES utilities for sandboxed JS runtimes and source parsing without
-/// external crypto dependencies.
+/// Supported digest algorithms for [JsCryptoHelpers].
+enum _DigestAlgorithm {
+  md5(64),
+  sha1(64),
+  sha256(64),
+  sha512(128);
+
+  final int blockSize;
+  const _DigestAlgorithm(this.blockSize);
+}
+
+/// Pure-Dart RFC 1321 MD5, FIPS-180-4 SHA-1/SHA-256/SHA-512, RFC 2104 HMAC,
+/// Base64, Hex, FIPS-197 AES (128/192/256), and FIPS-46 DES utilities for
+/// sandboxed JS runtimes and source parsing without external crypto dependencies.
 class JsCryptoHelpers {
   const JsCryptoHelpers._();
 
@@ -302,6 +313,25 @@ class JsCryptoHelpers {
     ],
   ];
 
+  static const List<int> _sha256Init = <int>[
+    0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a,
+    0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19,
+  ];
+
+  static const List<int> _sha256Constants = <int>[
+    0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1,
+    0x923f82a4, 0xab1c5ed5, 0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3,
+    0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174, 0xe49b69c1, 0xefbe4786,
+    0x0fc19dc6, 0x240ca1cc, 0x2de92c6f, 0x4a7484aa, 0x5cb0a9dc, 0x76f988da,
+    0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7, 0xc6e00bf3, 0xd5a79147,
+    0x06ca6351, 0x14292967, 0x27b70a85, 0x2e1b2138, 0x4d2c6dfc, 0x53380d13,
+    0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85, 0xa2bfe8a1, 0xa81a664b,
+    0xc24b8b70, 0xc76c51a3, 0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070,
+    0x19a4c116, 0x1e376c08, 0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a,
+    0x5b9cca4f, 0x682e6ff3, 0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208,
+    0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2,
+  ];
+
   /// Computes the 16-byte RFC 1321 MD5 digest of [bytes].
   static Uint8List md5Bytes(List<int> bytes) {
     final msgLen = bytes.length;
@@ -386,6 +416,74 @@ class JsCryptoHelpers {
   /// Computes the 16-character middle slice (`[8, 24)`) of the MD5 hex digest,
   /// matching Legado's `java.md5Encode16`.
   static String md5Hex16(String input) => md5Hex(input).substring(8, 24);
+
+  /// Computes raw digest bytes for [data] using [algorithm] (`MD5`, `SHA-1`/
+  /// `SHA1`, `SHA-256`/`SHA256`, or `SHA-512`/`SHA512`, case-insensitive).
+  static Uint8List digestBytes(List<int> data, String algorithm) =>
+      _digestByAlgorithm(data, _parseDigestAlgorithm(algorithm));
+
+  /// Computes the lowercase hexadecimal digest of [data] (UTF-8 string or byte
+  /// list) using [algorithm].
+  static String digestHex(Object? data, String algorithm) =>
+      hexEncode(digestBytes(coerceBytes(data, name: 'data'), algorithm));
+
+  /// Computes the Base64-encoded digest of [data] (UTF-8 string or byte list)
+  /// using [algorithm].
+  static String digestBase64(Object? data, String algorithm) =>
+      base64Encode(digestBytes(coerceBytes(data, name: 'data'), algorithm));
+
+  /// Computes raw RFC 2104 HMAC bytes for [data] and [key] using [algorithm]
+  /// (`HmacMD5`, `HmacSHA1`, `HmacSHA256`, or `HmacSHA512`, case-insensitive).
+  static Uint8List hmacBytes(List<int> data, List<int> key, String algorithm) {
+    final algo = _parseHmacAlgorithm(algorithm);
+    final blockSize = algo.blockSize;
+    final keyBytes = key.length > blockSize
+        ? _digestByAlgorithm(key, algo)
+        : key;
+
+    final paddedKey = Uint8List(blockSize);
+    paddedKey.setRange(0, keyBytes.length, keyBytes);
+
+    final inner = Uint8List(blockSize + data.length);
+    for (var i = 0; i < blockSize; i++) {
+      inner[i] = paddedKey[i] ^ 0x36;
+    }
+    inner.setRange(blockSize, inner.length, data);
+    final innerHash = _digestByAlgorithm(inner, algo);
+
+    final outer = Uint8List(blockSize + innerHash.length);
+    for (var i = 0; i < blockSize; i++) {
+      outer[i] = paddedKey[i] ^ 0x5c;
+    }
+    outer.setRange(blockSize, outer.length, innerHash);
+    return _digestByAlgorithm(outer, algo);
+  }
+
+  /// Computes the lowercase hexadecimal RFC 2104 HMAC of [data] and [key]
+  /// using [algorithm].
+  static String hmacHex(Object? data, Object? key, String algorithm) =>
+      hexEncode(
+        hmacBytes(
+          coerceBytes(data, name: 'data'),
+          coerceBytes(key, name: 'key'),
+          algorithm,
+        ),
+      );
+
+  /// Computes the Base64-encoded RFC 2104 HMAC of [data] and [key] using
+  /// [algorithm].
+  static String hmacBase64(Object? data, Object? key, String algorithm) =>
+      base64Encode(
+        hmacBytes(
+          coerceBytes(data, name: 'data'),
+          coerceBytes(key, name: 'key'),
+          algorithm,
+        ),
+      );
+
+  /// Encodes [data] (UTF-8 string or byte list) into lowercase hexadecimal.
+  static String hexEncodeString(Object? data) =>
+      hexEncode(coerceBytes(data, name: 'data'));
 
   /// Encodes [bytes] into lowercase hexadecimal.
   static String hexEncode(List<int> bytes) {
@@ -1161,10 +1259,382 @@ class JsCryptoHelpers {
     return ((v << shift) | (v >>> (32 - shift))) & 0xFFFFFFFF;
   }
 
+  static int _rotr32(int value, int shift) {
+    final v = value & 0xFFFFFFFF;
+    return ((v >>> shift) | (v << (32 - shift))) & 0xFFFFFFFF;
+  }
+
+  static int _rotr64(int value, int shift) =>
+      (value >>> shift) | (value << (64 - shift));
+
+  static int _readUint32Be(Uint8List bytes, int offset) {
+    return ((bytes[offset] & 0xFF) << 24) |
+        ((bytes[offset + 1] & 0xFF) << 16) |
+        ((bytes[offset + 2] & 0xFF) << 8) |
+        (bytes[offset + 3] & 0xFF);
+  }
+
+  static void _writeUint32Be(Uint8List out, int offset, int value) {
+    out[offset] = (value >>> 24) & 0xFF;
+    out[offset + 1] = (value >>> 16) & 0xFF;
+    out[offset + 2] = (value >>> 8) & 0xFF;
+    out[offset + 3] = value & 0xFF;
+  }
+
+  static int _readUint64Be(Uint8List bytes, int offset) {
+    return ((bytes[offset] & 0xFF) << 56) |
+        ((bytes[offset + 1] & 0xFF) << 48) |
+        ((bytes[offset + 2] & 0xFF) << 40) |
+        ((bytes[offset + 3] & 0xFF) << 32) |
+        ((bytes[offset + 4] & 0xFF) << 24) |
+        ((bytes[offset + 5] & 0xFF) << 16) |
+        ((bytes[offset + 6] & 0xFF) << 8) |
+        (bytes[offset + 7] & 0xFF);
+  }
+
+  static void _writeUint64Be(Uint8List out, int offset, int value) {
+    out[offset] = (value >>> 56) & 0xFF;
+    out[offset + 1] = (value >>> 48) & 0xFF;
+    out[offset + 2] = (value >>> 40) & 0xFF;
+    out[offset + 3] = (value >>> 32) & 0xFF;
+    out[offset + 4] = (value >>> 24) & 0xFF;
+    out[offset + 5] = (value >>> 16) & 0xFF;
+    out[offset + 6] = (value >>> 8) & 0xFF;
+    out[offset + 7] = value & 0xFF;
+  }
+
   static void _writeUint32Le(Uint8List out, int offset, int value) {
     out[offset] = value & 0xFF;
     out[offset + 1] = (value >>> 8) & 0xFF;
     out[offset + 2] = (value >>> 16) & 0xFF;
     out[offset + 3] = (value >>> 24) & 0xFF;
+  }
+
+  // ---------------------------------------------------------------------------
+  // FIPS-180-4 SHA-1 / SHA-256 / SHA-512
+  // ---------------------------------------------------------------------------
+
+  static _DigestAlgorithm _parseDigestAlgorithm(String algorithm) {
+    switch (algorithm.trim().toUpperCase()) {
+      case 'MD5':
+        return _DigestAlgorithm.md5;
+      case 'SHA-1':
+      case 'SHA1':
+        return _DigestAlgorithm.sha1;
+      case 'SHA-256':
+      case 'SHA256':
+        return _DigestAlgorithm.sha256;
+      case 'SHA-512':
+      case 'SHA512':
+        return _DigestAlgorithm.sha512;
+      default:
+        throw ArgumentError.value(
+          algorithm,
+          'algorithm',
+          'Unsupported digest algorithm "$algorithm". Expected MD5, SHA-1, SHA-256, or SHA-512.',
+        );
+    }
+  }
+
+  static _DigestAlgorithm _parseHmacAlgorithm(String algorithm) {
+    switch (algorithm.trim().toUpperCase()) {
+      case 'HMACMD5':
+      case 'HMAC-MD5':
+      case 'HMAC_MD5':
+        return _DigestAlgorithm.md5;
+      case 'HMACSHA1':
+      case 'HMAC-SHA1':
+      case 'HMAC_SHA1':
+      case 'HMACSHA-1':
+      case 'HMAC-SHA-1':
+        return _DigestAlgorithm.sha1;
+      case 'HMACSHA256':
+      case 'HMAC-SHA256':
+      case 'HMAC_SHA256':
+      case 'HMACSHA-256':
+      case 'HMAC-SHA-256':
+        return _DigestAlgorithm.sha256;
+      case 'HMACSHA512':
+      case 'HMAC-SHA512':
+      case 'HMAC_SHA512':
+      case 'HMACSHA-512':
+      case 'HMAC-SHA-512':
+        return _DigestAlgorithm.sha512;
+      default:
+        throw ArgumentError.value(
+          algorithm,
+          'algorithm',
+          'Unsupported HMAC algorithm "$algorithm". Expected HmacMD5, HmacSHA1, HmacSHA256, or HmacSHA512.',
+        );
+    }
+  }
+
+  static Uint8List _digestByAlgorithm(
+    List<int> bytes,
+    _DigestAlgorithm algorithm,
+  ) {
+    return switch (algorithm) {
+      _DigestAlgorithm.md5 => md5Bytes(bytes),
+      _DigestAlgorithm.sha1 => _sha1Bytes(bytes),
+      _DigestAlgorithm.sha256 => _sha256Bytes(bytes),
+      _DigestAlgorithm.sha512 => _sha512Bytes(bytes),
+    };
+  }
+
+  static Uint8List _padMessageBigEndian(List<int> bytes, int blockSize) {
+    final msgLen = bytes.length;
+    final lenFieldBytes = blockSize == 128 ? 16 : 8;
+    final minTail = 1 + lenFieldBytes;
+    final rem = (msgLen + minTail) % blockSize;
+    final padZeros = rem == 0 ? 0 : blockSize - rem;
+    final totalLen = msgLen + minTail + padZeros;
+
+    final padded = Uint8List(totalLen);
+    padded.setRange(0, msgLen, bytes);
+    padded[msgLen] = 0x80;
+
+    final lowBits = msgLen << 3;
+    final highBits = msgLen >>> 61;
+    if (lenFieldBytes == 16) {
+      _writeUint64Be(padded, totalLen - 16, highBits);
+      _writeUint64Be(padded, totalLen - 8, lowBits);
+    } else {
+      _writeUint64Be(padded, totalLen - 8, lowBits);
+    }
+    return padded;
+  }
+
+  static Uint8List _sha1Bytes(List<int> bytes) {
+    final padded = _padMessageBigEndian(bytes, 64);
+    var h0 = 0x67452301;
+    var h1 = 0xefcdab89;
+    var h2 = 0x98badcfe;
+    var h3 = 0x10325476;
+    var h4 = 0xc3d2e1f0;
+
+    final w = Uint32List(80);
+    for (var offset = 0; offset < padded.length; offset += 64) {
+      for (var t = 0; t < 16; t++) {
+        w[t] = _readUint32Be(padded, offset + t * 4);
+      }
+      for (var t = 16; t < 80; t++) {
+        w[t] = _rotl32(w[t - 3] ^ w[t - 8] ^ w[t - 14] ^ w[t - 16], 1);
+      }
+
+      var a = h0;
+      var b = h1;
+      var c = h2;
+      var d = h3;
+      var e = h4;
+
+      for (var t = 0; t < 80; t++) {
+        final int f;
+        final int k;
+        if (t < 20) {
+          f = (b & c) | ((~b) & d);
+          k = 0x5a827999;
+        } else if (t < 40) {
+          f = b ^ c ^ d;
+          k = 0x6ed9eba1;
+        } else if (t < 60) {
+          f = (b & c) | (b & d) | (c & d);
+          k = 0x8f1bbcdc;
+        } else {
+          f = b ^ c ^ d;
+          k = 0xca62c1d6;
+        }
+        final temp =
+            (_rotl32(a, 5) + (f & 0xFFFFFFFF) + e + k + w[t]) & 0xFFFFFFFF;
+        e = d;
+        d = c;
+        c = _rotl32(b, 30);
+        b = a;
+        a = temp;
+      }
+
+      h0 = (h0 + a) & 0xFFFFFFFF;
+      h1 = (h1 + b) & 0xFFFFFFFF;
+      h2 = (h2 + c) & 0xFFFFFFFF;
+      h3 = (h3 + d) & 0xFFFFFFFF;
+      h4 = (h4 + e) & 0xFFFFFFFF;
+    }
+
+    final digest = Uint8List(20);
+    _writeUint32Be(digest, 0, h0);
+    _writeUint32Be(digest, 4, h1);
+    _writeUint32Be(digest, 8, h2);
+    _writeUint32Be(digest, 12, h3);
+    _writeUint32Be(digest, 16, h4);
+    return digest;
+  }
+
+  static Uint8List _sha256Bytes(List<int> bytes) {
+    final padded = _padMessageBigEndian(bytes, 64);
+    final state = Uint32List.fromList(_sha256Init);
+    final w = Uint32List(64);
+
+    for (var offset = 0; offset < padded.length; offset += 64) {
+      for (var t = 0; t < 16; t++) {
+        w[t] = _readUint32Be(padded, offset + t * 4);
+      }
+      for (var t = 16; t < 64; t++) {
+        final s0 =
+            _rotr32(w[t - 15], 7) ^ _rotr32(w[t - 15], 18) ^ (w[t - 15] >>> 3);
+        final s1 =
+            _rotr32(w[t - 2], 17) ^ _rotr32(w[t - 2], 19) ^ (w[t - 2] >>> 10);
+        w[t] = (w[t - 16] + s0 + w[t - 7] + s1) & 0xFFFFFFFF;
+      }
+
+      var a = state[0];
+      var b = state[1];
+      var c = state[2];
+      var d = state[3];
+      var e = state[4];
+      var f = state[5];
+      var g = state[6];
+      var h = state[7];
+
+      for (var t = 0; t < 64; t++) {
+        final sum1 = _rotr32(e, 6) ^ _rotr32(e, 11) ^ _rotr32(e, 25);
+        final ch = (e & f) ^ ((~e) & g);
+        final temp1 =
+            (h + sum1 + (ch & 0xFFFFFFFF) + _sha256Constants[t] + w[t]) &
+            0xFFFFFFFF;
+        final sum0 = _rotr32(a, 2) ^ _rotr32(a, 13) ^ _rotr32(a, 22);
+        final maj = (a & b) ^ (a & c) ^ (b & c);
+        final temp2 = (sum0 + (maj & 0xFFFFFFFF)) & 0xFFFFFFFF;
+
+        h = g;
+        g = f;
+        f = e;
+        e = (d + temp1) & 0xFFFFFFFF;
+        d = c;
+        c = b;
+        b = a;
+        a = (temp1 + temp2) & 0xFFFFFFFF;
+      }
+
+      state[0] = (state[0] + a) & 0xFFFFFFFF;
+      state[1] = (state[1] + b) & 0xFFFFFFFF;
+      state[2] = (state[2] + c) & 0xFFFFFFFF;
+      state[3] = (state[3] + d) & 0xFFFFFFFF;
+      state[4] = (state[4] + e) & 0xFFFFFFFF;
+      state[5] = (state[5] + f) & 0xFFFFFFFF;
+      state[6] = (state[6] + g) & 0xFFFFFFFF;
+      state[7] = (state[7] + h) & 0xFFFFFFFF;
+    }
+
+    final digest = Uint8List(32);
+    for (var i = 0; i < 8; i++) {
+      _writeUint32Be(digest, i * 4, state[i]);
+    }
+    return digest;
+  }
+
+  static final List<int> _sha512Constants = _computeSha512Constants();
+
+  static List<int> _computeSha512Constants() {
+    // First 64 bits of fractional parts of cube roots of the first 80 primes.
+    final constants = List<int>.filled(80, 0);
+    final three = BigInt.from(3);
+    var count = 0;
+    var candidate = 2;
+    while (count < 80) {
+      var isPrime = true;
+      for (var d = 2; d * d <= candidate; d++) {
+        if (candidate % d == 0) {
+          isPrime = false;
+          break;
+        }
+      }
+      if (isPrime) {
+        var intPart = 1;
+        while ((intPart + 1) * (intPart + 1) * (intPart + 1) <= candidate) {
+          intPart++;
+        }
+        final scaled = BigInt.from(candidate) << 192;
+        var x = BigInt.from(intPart + 1) << 64;
+        while (true) {
+          final next = ((x * BigInt.two) + (scaled ~/ (x * x))) ~/ three;
+          if (next >= x) break;
+          x = next;
+        }
+        final frac = x - (BigInt.from(intPart) << 64);
+        constants[count++] = frac.toSigned(64).toInt();
+      }
+      candidate++;
+    }
+    return List<int>.unmodifiable(constants);
+  }
+
+  static Uint8List _sha512Bytes(List<int> bytes) {
+    final padded = _padMessageBigEndian(bytes, 128);
+    final state = <int>[
+      0x6a09e667f3bcc908,
+      0xbb67ae8584caa73b,
+      0x3c6ef372fe94f82b,
+      0xa54ff53a5f1d36f1,
+      0x510e527fade682d1,
+      0x9b05688c2b3e6c1f,
+      0x1f83d9abfb41bd6b,
+      0x5be0cd19137e2179,
+    ];
+    final w = List<int>.filled(80, 0);
+    final kTable = _sha512Constants;
+
+    for (var offset = 0; offset < padded.length; offset += 128) {
+      for (var t = 0; t < 16; t++) {
+        w[t] = _readUint64Be(padded, offset + t * 8);
+      }
+      for (var t = 16; t < 80; t++) {
+        final s0 =
+            _rotr64(w[t - 15], 1) ^ _rotr64(w[t - 15], 8) ^ (w[t - 15] >>> 7);
+        final s1 =
+            _rotr64(w[t - 2], 19) ^ _rotr64(w[t - 2], 61) ^ (w[t - 2] >>> 6);
+        w[t] = w[t - 16] + s0 + w[t - 7] + s1;
+      }
+
+      var a = state[0];
+      var b = state[1];
+      var c = state[2];
+      var d = state[3];
+      var e = state[4];
+      var f = state[5];
+      var g = state[6];
+      var h = state[7];
+
+      for (var t = 0; t < 80; t++) {
+        final sum1 = _rotr64(e, 14) ^ _rotr64(e, 18) ^ _rotr64(e, 41);
+        final ch = (e & f) ^ ((~e) & g);
+        final temp1 = h + sum1 + ch + kTable[t] + w[t];
+        final sum0 = _rotr64(a, 28) ^ _rotr64(a, 34) ^ _rotr64(a, 39);
+        final maj = (a & b) ^ (a & c) ^ (b & c);
+        final temp2 = sum0 + maj;
+
+        h = g;
+        g = f;
+        f = e;
+        e = d + temp1;
+        d = c;
+        c = b;
+        b = a;
+        a = temp1 + temp2;
+      }
+
+      state[0] += a;
+      state[1] += b;
+      state[2] += c;
+      state[3] += d;
+      state[4] += e;
+      state[5] += f;
+      state[6] += g;
+      state[7] += h;
+    }
+
+    final digest = Uint8List(64);
+    for (var i = 0; i < 8; i++) {
+      _writeUint64Be(digest, i * 8, state[i]);
+    }
+    return digest;
   }
 }

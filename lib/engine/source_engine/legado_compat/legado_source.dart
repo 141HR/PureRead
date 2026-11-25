@@ -26,6 +26,7 @@ class LegadoSearchRule {
   final String lastChapter;
   final String kind;
   final String wordCount;
+  final String checkKeyWord;
   final bool webView;
 
   const LegadoSearchRule({
@@ -38,6 +39,7 @@ class LegadoSearchRule {
     this.lastChapter = '',
     this.kind = '',
     this.wordCount = '',
+    this.checkKeyWord = '',
     this.webView = false,
   });
 
@@ -52,6 +54,7 @@ class LegadoSearchRule {
       lastChapter: (json['lastChapter'] ?? '').toString(),
       kind: (json['kind'] ?? '').toString(),
       wordCount: (json['wordCount'] ?? '').toString(),
+      checkKeyWord: (json['checkKeyWord'] ?? '').toString(),
       webView: json['webView'] == true,
     );
   }
@@ -111,6 +114,7 @@ class LegadoTocRule {
   final String isVip;
   final String isPay;
   final String updateTime;
+  final String preUpdateJs;
   final bool webView;
 
   const LegadoTocRule({
@@ -121,6 +125,7 @@ class LegadoTocRule {
     this.isVip = '',
     this.isPay = '',
     this.updateTime = '',
+    this.preUpdateJs = '',
     this.webView = false,
   });
 
@@ -133,6 +138,7 @@ class LegadoTocRule {
       isVip: (json['isVip'] ?? '').toString(),
       isPay: (json['isPay'] ?? '').toString(),
       updateTime: (json['updateTime'] ?? '').toString(),
+      preUpdateJs: (json['preUpdateJs'] ?? '').toString(),
       webView: json['webView'] == true,
     );
   }
@@ -710,6 +716,36 @@ class LegadoSourceParser {
     );
   }
 
+  static final RegExp _nonJsoupPackagesPattern = RegExp(
+    r'Packages\.(?!org\.jsoup\b)',
+  );
+  static final RegExp _rhinoJavaPackagePattern = RegExp(
+    r'\bjava\.(?:lang|net|io|util)\.',
+  );
+  static final RegExp _nonJsoupImportClassPattern = RegExp(
+    r'importClass\(\s*(?!(?:Packages\.)?org\.jsoup\.)',
+  );
+  static final RegExp _symmetricCryptoPattern = RegExp(
+    r'(?:createSymmetricCrypto|\b(?:aes|des)(?:Base64|Encode|Decode|Encrypt|Decrypt)|CryptoJS\.(?:AES|DES)|(?:AES|DES)/)',
+    caseSensitive: false,
+  );
+  static final RegExp _digestHmacPattern = RegExp(
+    r'\b(?:digestHex|digestBase64|createDigest|createHMac|HMacHex|HMacBase64|sha1Encode|sha256Encode|sha512Encode|hexEncodeToString)\b',
+    caseSensitive: false,
+  );
+  static final RegExp _bookVariablePattern = RegExp(
+    r'\bbook\.(?:getVariable|putVariable|variable|getCustomVariable|putCustomVariable)\b',
+  );
+
+  /// Returns `true` when [text] references Rhino/Java APIs outside the
+  /// supported `org.jsoup.*` DOM bridge (`Packages.<non-jsoup>`, `java.lang.*`,
+  /// `java.net.*`, `java.io.*`, `java.util.*`, or non-Jsoup `importClass(...)`).
+  static bool hasUnsupportedRhinoApi(String text) {
+    return _nonJsoupPackagesPattern.hasMatch(text) ||
+        _rhinoJavaPackagePattern.hasMatch(text) ||
+        _nonJsoupImportClassPattern.hasMatch(text);
+  }
+
   /// Classifies a [LegadoBookSource] and collects its detected DSL features.
   static ({
     LegadoCompatibilityStatus compatibility,
@@ -764,12 +800,10 @@ class LegadoSourceParser {
       );
     }
 
-    final hasRhino = blob.contains('Packages.') ||
-        RegExp(r'\bjava\.lang\.').hasMatch(blob) ||
-        blob.contains('importClass(') ||
-        blob.contains('org.jsoup.');
-    if (hasRhino) {
-      reasons.add('Rhino Java/Jsoup API (Packages.*/java.lang.*)');
+    if (hasUnsupportedRhinoApi(blob)) {
+      reasons.add(
+        'Rhino Java API (non-Jsoup Packages.*/java.lang/net/io/util)',
+      );
       return (
         compatibility: LegadoCompatibilityStatus.unsupportedRhino,
         unsupportedReasons: reasons,
@@ -823,6 +857,39 @@ class LegadoSourceParser {
         blob.contains('!')) {
       f.add('legadoDefaultChain');
     }
+    if (_hasColonRegexRule(s)) f.add('colonRegex');
+    if (_symmetricCryptoPattern.hasMatch(blob)) f.add('symmetricCrypto');
+    if (blob.contains('org.jsoup.')) f.add('jsoup');
+    if (blob.contains('ajaxAll')) f.add('ajaxAll');
+    if (_digestHmacPattern.hasMatch(blob)) f.add('digestHmac');
+    if (_bookVariablePattern.hasMatch(blob)) f.add('bookVariable');
+    if (s.ruleSearch.checkKeyWord.trim().isNotEmpty) f.add('checkKeyWord');
+    if (s.ruleToc.preUpdateJs.trim().isNotEmpty) f.add('preUpdateJs');
     return f;
+  }
+
+  static bool _hasColonRegexRule(LegadoBookSource s) {
+    final fields = <String>[
+      s.ruleSearch.bookList,
+      s.ruleSearch.name,
+      s.ruleSearch.author,
+      s.ruleSearch.bookUrl,
+      s.ruleBookInfo.init,
+      s.ruleBookInfo.name,
+      s.ruleToc.chapterList,
+      s.ruleToc.chapterName,
+      s.ruleToc.chapterUrl,
+      s.ruleContent.content,
+    ];
+    for (final raw in fields) {
+      final t = raw.trim();
+      if (t.isEmpty) continue;
+      if (t.toLowerCase().contains('@regex:')) return true;
+      for (final part in t.split(RegExp(r'\n|\&\&|\|\||%%'))) {
+        final p = part.trim();
+        if (p.startsWith(':') && !p.startsWith('::')) return true;
+      }
+    }
+    return false;
   }
 }

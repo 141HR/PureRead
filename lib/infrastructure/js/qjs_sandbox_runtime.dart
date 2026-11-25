@@ -20,10 +20,13 @@ typedef HostAsyncCallback = Future<Object?> Function(List<Object?> args);
 /// - Async host Promise bridging (`JSPromise.fromAsyncFunction`) with host-side
 ///   [Timer] + [qjs.JSInterruptHandle.requestInterrupt] guard
 /// - Cooperative [CancellationToken] via [qjs.JSInterruptHandle.requestInterrupt]
-/// - Built-in pure-Dart RFC1321 MD5 (`host.md5`, `host.md5Encode16`), Base64
-///   (`host.base64Encode`, `host.base64Decode`, global `btoa`/`atob`), and
-///   FIPS-197 AES / FIPS-46 DES symmetric crypto (`host.aesEncodeBase64`,
-///   `host.aesDecodeBase64`, `host.symmetricCrypto`) helpers
+/// - Built-in pure-Dart RFC1321 MD5 (`host.md5`, `host.md5Encode16`),
+///   FIPS-180-4 SHA-1/SHA-256/SHA-512 & RFC 2104 HMAC (`host.digestHex`,
+///   `host.digestBase64`, `host.hmacHex`, `host.hmacBase64`), Base64/Hex
+///   (`host.base64Encode`, `host.base64Decode`, `host.hexEncode`, global
+///   `btoa`/`atob`), and FIPS-197 AES / FIPS-46 DES symmetric crypto
+///   (`host.aesEncodeBase64`, `host.aesDecodeBase64`, `host.symmetricCrypto`)
+///   helpers
 class QjsSandboxRuntime implements JsRuntime {
   static const int defaultMemoryLimitBytes = 64 * 1024 * 1024;
   static const int defaultMaxStackSizeBytes = 512 * 1024;
@@ -402,6 +405,51 @@ class QjsSandboxRuntime implements JsRuntime {
       name: 'hexDecodeBytes',
     ).asValue;
 
+    hostObj['hexEncode'] = qjs.JSFunction.createFromHostFunction(
+      rt,
+      (innerRt, _, args) => _runHostCrypto(innerRt, () {
+        final dataArg = args.isNotEmpty ? _jsToDart(innerRt, args[0]) : null;
+        return JsCryptoHelpers.hexEncodeString(dataArg);
+      }),
+      name: 'hexEncode',
+    ).asValue;
+
+    hostObj['digestHex'] = qjs.JSFunction.createFromHostFunction(
+      rt,
+      (innerRt, _, args) => _runHostCrypto(
+        innerRt,
+        () => _evaluateDigestHost(innerRt, args, outputBase64: false),
+      ),
+      name: 'digestHex',
+    ).asValue;
+
+    hostObj['digestBase64'] = qjs.JSFunction.createFromHostFunction(
+      rt,
+      (innerRt, _, args) => _runHostCrypto(
+        innerRt,
+        () => _evaluateDigestHost(innerRt, args, outputBase64: true),
+      ),
+      name: 'digestBase64',
+    ).asValue;
+
+    hostObj['hmacHex'] = qjs.JSFunction.createFromHostFunction(
+      rt,
+      (innerRt, _, args) => _runHostCrypto(
+        innerRt,
+        () => _evaluateHmacHost(innerRt, args, outputBase64: false),
+      ),
+      name: 'hmacHex',
+    ).asValue;
+
+    hostObj['hmacBase64'] = qjs.JSFunction.createFromHostFunction(
+      rt,
+      (innerRt, _, args) => _runHostCrypto(
+        innerRt,
+        () => _evaluateHmacHost(innerRt, args, outputBase64: true),
+      ),
+      name: 'hmacBase64',
+    ).asValue;
+
     hostObj['aesEncodeBase64'] = qjs.JSFunction.createFromHostFunction(
       rt,
       (innerRt, _, args) => _runHostCrypto(
@@ -486,6 +534,38 @@ class QjsSandboxRuntime implements JsRuntime {
     } on Object catch (e) {
       throw qjs.JSException(qjs.JSError.create(rt, e.toString()));
     }
+  }
+
+  static String _evaluateDigestHost(
+    qjs.JSRuntime rt,
+    List<qjs.JSValue> args, {
+    required bool outputBase64,
+  }) {
+    final dataArg = args.isNotEmpty ? _jsToDart(rt, args[0]) : null;
+    final algorithm = args.length > 1
+        ? (_jsToOptionalString(rt, args[1]) ?? '')
+        : '';
+    return outputBase64
+        ? JsCryptoHelpers.digestBase64(dataArg, algorithm)
+        : JsCryptoHelpers.digestHex(dataArg, algorithm);
+  }
+
+  static String _evaluateHmacHost(
+    qjs.JSRuntime rt,
+    List<qjs.JSValue> args, {
+    required bool outputBase64,
+  }) {
+    final dataArg = args.isNotEmpty ? _jsToDart(rt, args[0]) : null;
+    final keyArg = args.length > 1 ? _jsToDart(rt, args[1]) : null;
+    final algorithm = args.length > 2
+        ? (_jsToOptionalString(rt, args[2]) ?? '')
+        : '';
+    if (keyArg == null) {
+      throw ArgumentError('HMAC key must not be null or undefined.');
+    }
+    return outputBase64
+        ? JsCryptoHelpers.hmacBase64(dataArg, keyArg, algorithm)
+        : JsCryptoHelpers.hmacHex(dataArg, keyArg, algorithm);
   }
 
   static Object? _evaluateAesHost(

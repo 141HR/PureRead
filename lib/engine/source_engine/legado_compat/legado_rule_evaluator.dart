@@ -1,8 +1,13 @@
 import 'dart:convert';
+import 'dart:math';
+
+import 'package:html/parser.dart' as html_parser;
 
 import '../../../domain/domain.dart';
+import '../../../infrastructure/js/js_crypto_helpers.dart';
 import '../../../infrastructure/js/qjs_sandbox_runtime.dart';
 import '../../../infrastructure/network/source_http_client.dart';
+import '../parsing/legado_jsoup_bridge.dart';
 import '../parsing/legado_selector_engine.dart';
 import 'legado_source.dart';
 
@@ -25,11 +30,27 @@ class LegadoRequestSpec {
   });
 }
 
+/// Cached entry stored by Legado `cache.put(key, value, saveSeconds?)`.
+class LegadoCacheEntry {
+  final String value;
+  final int? expiresAtMs;
+
+  const LegadoCacheEntry(this.value, this.expiresAtMs);
+
+  bool isExpired(int nowMs) {
+    final exp = expiresAtMs;
+    return exp != null && nowMs > exp;
+  }
+}
+
 /// Mutable per-operation / per-provider state shared across Legado rule and JS
-/// evaluations (`java.put`/`java.get`, `source.getVariable`/`setVariable`,
-/// cookie mutations, and debug logs).
+/// evaluations (`java.put`/`java.get`, `book.putVariable`/`book.getVariable`,
+/// `cache.get`/`cache.put`, `source.getVariable`/`setVariable`, cookie
+/// mutations, and debug logs).
 class LegadoEvalSession {
-  final Map<String, String> javaVars = <String, String>{};
+  final Map<String, String> javaVars;
+  final Map<String, String> bookVars;
+  final Map<String, LegadoCacheEntry> cacheEntries;
   final Map<String, String> cookieSnapshotByHost = <String, String>{};
   final List<({String type, String url, String value})> _pendingCookieOps =
       <({String type, String url, String value})>[];
@@ -39,6 +60,8 @@ class LegadoEvalSession {
   String bookName;
   String bookUrl;
   String tocUrl;
+  String bookVariable;
+  String bookCustomVariable;
   String chapterTitle;
   String chapterUrl;
   int chapterIndex;
@@ -48,10 +71,17 @@ class LegadoEvalSession {
     this.bookName = '',
     this.bookUrl = '',
     this.tocUrl = '',
+    this.bookVariable = '',
+    this.bookCustomVariable = '',
     this.chapterTitle = '',
     this.chapterUrl = '',
     this.chapterIndex = 0,
-  });
+    Map<String, String>? javaVars,
+    Map<String, String>? bookVars,
+    Map<String, LegadoCacheEntry>? cacheEntries,
+  }) : javaVars = javaVars ?? <String, String>{},
+       bookVars = bookVars ?? <String, String>{},
+       cacheEntries = cacheEntries ?? <String, LegadoCacheEntry>{};
 
   Future<void> preloadCookies(
     SourceHttpClient httpClient,
@@ -285,8 +315,21 @@ class LegadoRuleEvaluator {
               cancelToken: cancelToken,
             );
           case _JsStage(:final code):
-            final jsInput = _interpolateKeyPageLiterals(
-              code,
+            var jsInput = code;
+            if (jsInput.contains('{{') && jsInput.contains('}}')) {
+              jsInput = await _resolveMustacheExpressionsOnly(
+                jsInput,
+                input: current,
+                baseUrl: baseUrl,
+                keyword: keyword,
+                page: page,
+                session: activeSession,
+                preserveKeyPage: true,
+                cancelToken: cancelToken,
+              );
+            }
+            jsInput = _interpolateKeyPageLiterals(
+              jsInput,
               keyword: keyword,
               page: page,
               isJsCode: true,
@@ -420,9 +463,22 @@ class LegadoRuleEvaluator {
           final nextValues = <String>[];
           final inputs = values.isEmpty ? const <String>[''] : values;
           for (final currentInput in inputs) {
+            final resolvedCode =
+                (code.contains('{{') && code.contains('}}'))
+                    ? await _resolveMustacheExpressionsOnly(
+                        code,
+                        input: currentInput,
+                        baseUrl: baseUrl,
+                        keyword: keyword,
+                        page: page,
+                        session: activeSession,
+                        cancelToken: cancelToken,
+                      )
+                    : code;
             final jsOut = await _runJsSnippet(
-              code,
+              resolvedCode,
               result: currentInput,
+              src: input,
               baseUrl: baseUrl,
               keyword: keyword,
               page: page,
@@ -501,6 +557,7 @@ class LegadoRuleEvaluator {
           cancelToken: cancelToken,
         );
       } else {
+        final isTemplate = _isMustacheTemplateRule(cleaned);
         final resolved = await _resolveMustacheInRule(
           cleaned,
           input: input,
@@ -510,11 +567,20 @@ class LegadoRuleEvaluator {
           session: activeSession,
           cancelToken: cancelToken,
         );
-        resultStr = LegadoSelectorEngine.selectOne(
-          input,
-          resolved,
-          joinSeparator: joinSeparator,
-        );
+        if (isTemplate) {
+          final (:selectorPart, :regexSpec) =
+              LegadoSelectorEngine.splitTrailingRegex(resolved);
+          resultStr = regexSpec.isEmpty
+              ? selectorPart
+              : LegadoSelectorEngine.applyRegexSpec(selectorPart, regexSpec);
+        } else {
+          final normalized = _normalizeRuleForInput(input, resolved);
+          resultStr = LegadoSelectorEngine.selectOne(
+            input,
+            normalized,
+            joinSeparator: joinSeparator,
+          );
+        }
       }
       if (httpClient != null) {
         await activeSession.flushCookies(httpClient!);
@@ -585,36 +651,93 @@ class LegadoRuleEvaluator {
               session: activeSession,
               cancelToken: cancelToken,
             );
-            next.addAll(LegadoSelectorEngine.selectElements(current, resolved));
+            final normalized = _normalizeRuleForInput(current, resolved);
+            next.addAll(
+              LegadoSelectorEngine.selectElements(current, normalized),
+            );
           }
           blocks = next;
 
         case _JsStage(:final code):
           final next = <String>[];
-          final inputs = blocks.isEmpty ? const <String>[''] : blocks;
-          for (final current in inputs) {
+          if (i > 0 &&
+              blocks.isNotEmpty &&
+              !LegadoSelectorEngine.isRegexMatchEnvelope(blocks.first) &&
+              !_isJsonInput(blocks.first)) {
+            final resolvedCode =
+                (code.contains('{{') && code.contains('}}'))
+                    ? await _resolveMustacheExpressionsOnly(
+                        code,
+                        input: input,
+                        baseUrl: baseUrl,
+                        session: activeSession,
+                        cancelToken: cancelToken,
+                      )
+                    : code;
             final jsOut = await _runJsSnippet(
-              code,
-              result: current,
+              resolvedCode,
+              result: input,
+              src: input,
+              elementBlocks: blocks,
               baseUrl: baseUrl,
               session: activeSession,
               cancelToken: cancelToken,
             );
-            if (jsOut.isEmpty) continue;
-            final trimmedOut = jsOut.trim();
-            final hasFollowingJsonSelector = i + 1 < stages.length &&
-                stages[i + 1] is _SelectorStage &&
-                (_looksLikeJsonRule((stages[i + 1] as _SelectorStage).rule));
-            if (!hasFollowingJsonSelector &&
-                trimmedOut.startsWith('[') &&
-                trimmedOut.endsWith(']')) {
-              final unpacked = _tryDecodeJsonRawItems(trimmedOut);
-              if (unpacked != null) {
-                next.addAll(unpacked);
-                continue;
+            if (jsOut.isNotEmpty) {
+              final trimmedOut = jsOut.trim();
+              final hasFollowingJsonSelector = i + 1 < stages.length &&
+                  stages[i + 1] is _SelectorStage &&
+                  (_looksLikeJsonRule((stages[i + 1] as _SelectorStage).rule));
+              if (!hasFollowingJsonSelector &&
+                  trimmedOut.startsWith('[') &&
+                  trimmedOut.endsWith(']')) {
+                final unpacked = _tryDecodeJsonRawItems(trimmedOut);
+                if (unpacked != null) {
+                  next.addAll(unpacked);
+                } else {
+                  next.add(jsOut);
+                }
+              } else {
+                next.add(jsOut);
               }
             }
-            next.add(jsOut);
+          } else {
+            final inputs = blocks.isEmpty ? const <String>[''] : blocks;
+            for (final current in inputs) {
+              final resolvedCode =
+                  (code.contains('{{') && code.contains('}}'))
+                      ? await _resolveMustacheExpressionsOnly(
+                          code,
+                          input: current,
+                          baseUrl: baseUrl,
+                          session: activeSession,
+                          cancelToken: cancelToken,
+                        )
+                      : code;
+              final jsOut = await _runJsSnippet(
+                resolvedCode,
+                result: current,
+                src: input,
+                baseUrl: baseUrl,
+                session: activeSession,
+                cancelToken: cancelToken,
+              );
+              if (jsOut.isEmpty) continue;
+              final trimmedOut = jsOut.trim();
+              final hasFollowingJsonSelector = i + 1 < stages.length &&
+                  stages[i + 1] is _SelectorStage &&
+                  (_looksLikeJsonRule((stages[i + 1] as _SelectorStage).rule));
+              if (!hasFollowingJsonSelector &&
+                  trimmedOut.startsWith('[') &&
+                  trimmedOut.endsWith(']')) {
+                final unpacked = _tryDecodeJsonRawItems(trimmedOut);
+                if (unpacked != null) {
+                  next.addAll(unpacked);
+                  continue;
+                }
+              }
+              next.add(jsOut);
+            }
           }
           blocks = next;
       }
@@ -723,6 +846,7 @@ class LegadoRuleEvaluator {
         cancelToken: cancelToken,
       );
     }
+    final isTemplate = _isMustacheTemplateRule(rule);
     final resolvedRule = await _resolveMustacheInRule(
       rule,
       input: currentInput,
@@ -732,7 +856,16 @@ class LegadoRuleEvaluator {
       session: session,
       cancelToken: cancelToken,
     );
-    return LegadoSelectorEngine.selectValues(currentInput, resolvedRule);
+    if (isTemplate) {
+      final (:selectorPart, :regexSpec) =
+          LegadoSelectorEngine.splitTrailingRegex(resolvedRule);
+      final value = regexSpec.isEmpty
+          ? selectorPart
+          : LegadoSelectorEngine.applyRegexSpec(selectorPart, regexSpec);
+      return value.isEmpty ? const <String>[] : <String>[value];
+    }
+    final normalized = _normalizeRuleForInput(currentInput, resolvedRule);
+    return LegadoSelectorEngine.selectValues(currentInput, normalized);
   }
 
   Future<String> _evaluateRegexMatchedOne(
@@ -986,31 +1119,17 @@ class LegadoRuleEvaluator {
       out = LegadoSelectorEngine.interpolateTemplate(out, page: page);
     }
     if (out.contains('{{') && out.contains('}}')) {
-      final matches = _findMustacheExpressions(out);
-      if (matches.isNotEmpty) {
-        final buf = StringBuffer();
-        var cursor = 0;
-        for (final m in matches) {
-          buf.write(expandLiteral(out.substring(cursor, m.start)));
-          final expr = m.expr.trim();
-          final replacement = await _evaluateMustacheExpression(
-            expr,
-            input: input,
-            baseUrl: baseUrl,
-            keyword: keyword,
-            page: page,
-            session: session,
-            regexGroups: regexGroups,
-            cancelToken: cancelToken,
-          );
-          buf.write(replacement);
-          cursor = m.end;
-        }
-        buf.write(expandLiteral(out.substring(cursor)));
-        out = buf.toString();
-      } else {
-        out = expandLiteral(out);
-      }
+      out = await _resolveMustacheExpressionsOnly(
+        out,
+        input: input,
+        baseUrl: baseUrl,
+        keyword: keyword,
+        page: page,
+        session: session,
+        regexGroups: regexGroups,
+        expandCaptures: expandCaptures,
+        cancelToken: cancelToken,
+      );
     } else {
       out = expandLiteral(out);
     }
@@ -1024,6 +1143,52 @@ class LegadoRuleEvaluator {
       );
     }
     return out;
+  }
+
+  Future<String> _resolveMustacheExpressionsOnly(
+    String out, {
+    required String input,
+    required String baseUrl,
+    String? keyword,
+    int? page,
+    required LegadoEvalSession session,
+    List<String>? regexGroups,
+    bool expandCaptures = false,
+    bool preserveKeyPage = false,
+    CancellationToken? cancelToken,
+  }) async {
+    String expandLiteral(String text) => expandCaptures && regexGroups != null
+        ? LegadoSelectorEngine.expandCaptureGroups(text, regexGroups)
+        : text;
+
+    final matches = _findMustacheExpressions(out);
+    if (matches.isEmpty) {
+      return expandLiteral(out);
+    }
+    final buf = StringBuffer();
+    var cursor = 0;
+    for (final m in matches) {
+      buf.write(expandLiteral(out.substring(cursor, m.start)));
+      final expr = m.expr.trim();
+      if (preserveKeyPage && (expr == 'key' || expr == 'page')) {
+        buf.write(out.substring(m.start, m.end));
+      } else {
+        final replacement = await _evaluateMustacheExpression(
+          expr,
+          input: input,
+          baseUrl: baseUrl,
+          keyword: keyword,
+          page: page,
+          session: session,
+          regexGroups: regexGroups,
+          cancelToken: cancelToken,
+        );
+        buf.write(replacement);
+      }
+      cursor = m.end;
+    }
+    buf.write(expandLiteral(out.substring(cursor)));
+    return buf.toString();
   }
 
   Future<String> _resolveMustacheForUrl(
@@ -1120,6 +1285,7 @@ class LegadoRuleEvaluator {
     return _runJsSnippet(
       jsExpr,
       result: input,
+      src: effectiveInput,
       baseUrl: baseUrl,
       keyword: keyword,
       page: page,
@@ -1132,6 +1298,8 @@ class LegadoRuleEvaluator {
   Future<String> _runJsSnippet(
     String jsCode, {
     required String result,
+    String? src,
+    List<String>? elementBlocks,
     required String baseUrl,
     String? keyword,
     int? page,
@@ -1142,18 +1310,21 @@ class LegadoRuleEvaluator {
     cancelToken?.throwIfCancelled();
     _guardUnsupportedFeatures(jsCode);
 
-    final src = source;
-    final rawSourceKey = src?.bookSourceUrl ?? baseUrl;
-    final activeBaseUrl =
+    final bookSource = source;
+    final rawSourceKey = bookSource?.bookSourceUrl ?? baseUrl;
+    var activeBaseUrl =
         SourceHttpClient.tryNormalizeHttpUri(baseUrl)?.toString() ?? baseUrl;
     final resolvedGroups =
         regexGroups ?? LegadoSelectorEngine.decodeRegexMatch(result);
     final effectiveResult = (resolvedGroups != null && resolvedGroups.isNotEmpty)
         ? resolvedGroups[0]
         : result;
+    final effectiveSrc = src ?? effectiveResult;
     var currentContent = effectiveResult;
 
+    final jsoupBridge = LegadoJsoupBridge();
     final syncHost = <String, HostSyncCallback>{
+      ...jsoupBridge.buildSyncHostFunctions(),
       'javaPut': (args) {
         final k = args.isNotEmpty ? (args[0]?.toString() ?? '') : '';
         final v = args.length > 1 ? (args[1]?.toString() ?? '') : '';
@@ -1171,24 +1342,153 @@ class LegadoRuleEvaluator {
       },
       'javaSetContent': (args) {
         currentContent = args.isNotEmpty ? (args[0]?.toString() ?? '') : '';
+        if (args.length > 1 && args[1] != null) {
+          final nextBase = args[1].toString().trim();
+          if (nextBase.isNotEmpty) {
+            activeBaseUrl =
+                SourceHttpClient.tryNormalizeHttpUri(nextBase)?.toString() ??
+                nextBase;
+          }
+        }
         return null;
       },
       'javaGetString': (args) {
         final rule = args.isNotEmpty ? (args[0]?.toString() ?? '') : '';
-        return LegadoSelectorEngine.selectOne(currentContent, rule);
+        final targetArg = args.length > 1 ? args[1] : null;
+        if (targetArg is List) {
+          for (final item in targetArg) {
+            final itemStr = _coerceJsTargetToString(item);
+            final val = LegadoSelectorEngine.selectOne(
+              itemStr,
+              _normalizeRuleForInput(itemStr, rule),
+            );
+            if (val.isNotEmpty) return val;
+          }
+          return '';
+        }
+        final target = targetArg != null
+            ? _coerceJsTargetToString(targetArg)
+            : currentContent;
+        return LegadoSelectorEngine.selectOne(
+          target,
+          _normalizeRuleForInput(target, rule),
+        );
       },
       'javaGetStringList': (args) {
         final rule = args.isNotEmpty ? (args[0]?.toString() ?? '') : '';
-        return LegadoSelectorEngine.selectValues(currentContent, rule);
+        final targetArg = args.length > 1 ? args[1] : null;
+        if (targetArg is List) {
+          final out = <String>[];
+          for (final item in targetArg) {
+            final itemStr = _coerceJsTargetToString(item);
+            out.addAll(
+              LegadoSelectorEngine.selectValues(
+                itemStr,
+                _normalizeRuleForInput(itemStr, rule),
+              ),
+            );
+          }
+          return out;
+        }
+        final target = targetArg != null
+            ? _coerceJsTargetToString(targetArg)
+            : currentContent;
+        return LegadoSelectorEngine.selectValues(
+          target,
+          _normalizeRuleForInput(target, rule),
+        );
       },
       'javaGetElements': (args) {
         final rule = args.isNotEmpty ? (args[0]?.toString() ?? '') : '';
-        return LegadoSelectorEngine.selectElements(currentContent, rule);
+        final targetArg = args.length > 1 ? args[1] : null;
+        if (targetArg is List) {
+          final out = <String>[];
+          for (final item in targetArg) {
+            final itemStr = _coerceJsTargetToString(item);
+            out.addAll(
+              LegadoSelectorEngine.selectElements(
+                itemStr,
+                _normalizeRuleForInput(itemStr, rule),
+              ),
+            );
+          }
+          return out;
+        }
+        final target = targetArg != null
+            ? _coerceJsTargetToString(targetArg)
+            : currentContent;
+        return LegadoSelectorEngine.selectElements(
+          target,
+          _normalizeRuleForInput(target, rule),
+        );
       },
       'javaGetElement': (args) {
         final rule = args.isNotEmpty ? (args[0]?.toString() ?? '') : '';
-        final list = LegadoSelectorEngine.selectElements(currentContent, rule);
+        final targetArg = args.length > 1 ? args[1] : null;
+        final target = targetArg != null
+            ? _coerceJsTargetToString(targetArg)
+            : currentContent;
+        final list = LegadoSelectorEngine.selectElements(
+          target,
+          _normalizeRuleForInput(target, rule),
+        );
         return list.isEmpty ? '' : list.first;
+      },
+      'javaDigestBytes': (args) {
+        final dataArg = args.isNotEmpty ? args[0] : null;
+        final alg = args.length > 1 ? (args[1]?.toString() ?? '') : '';
+        return JsCryptoHelpers.digestBytes(
+          JsCryptoHelpers.coerceBytes(dataArg, name: 'data'),
+          alg,
+        );
+      },
+      'javaHmacBytes': (args) {
+        final dataArg = args.isNotEmpty ? args[0] : null;
+        final keyArg = args.length > 1 ? args[1] : null;
+        final alg = args.length > 2 ? (args[2]?.toString() ?? '') : '';
+        return JsCryptoHelpers.hmacBytes(
+          JsCryptoHelpers.coerceBytes(dataArg, name: 'data'),
+          JsCryptoHelpers.coerceBytes(keyArg, name: 'key'),
+          alg,
+        );
+      },
+      'javaRandomUUID': (_) => _generateUuidV4(),
+      'javaToURL': (args) {
+        final rawUrl = args.isNotEmpty ? (args[0]?.toString() ?? '') : '';
+        final rawBase = args.length > 1 ? args[1]?.toString() : null;
+        final resolved = SourceHttpClient.resolveUrl(
+          rawUrl,
+          (rawBase != null && rawBase.trim().isNotEmpty)
+              ? rawBase
+              : activeBaseUrl,
+        );
+        final uri = Uri.tryParse(resolved);
+        if (uri == null) {
+          return <String, Object?>{
+            'host': '',
+            'protocol': '',
+            'path': '',
+            'file': '',
+            'query': '',
+            'port': -1,
+            'authority': '',
+            'href': resolved,
+          };
+        }
+        return <String, Object?>{
+          'host': uri.host,
+          'protocol': uri.scheme,
+          'path': uri.path,
+          'file': uri.hasQuery ? '${uri.path}?${uri.query}' : uri.path,
+          'query': uri.query,
+          'port': uri.hasPort ? uri.port : -1,
+          'authority': uri.authority,
+          'href': uri.toString(),
+        };
+      },
+      'javaHtmlFormat': (args) {
+        final rawHtml = args.isNotEmpty ? (args[0]?.toString() ?? '') : '';
+        return formatHtmlText(rawHtml);
       },
       'javaHexDecodeToString': (args) {
         final hex = args.isNotEmpty ? (args[0]?.toString() ?? '') : '';
@@ -1211,21 +1511,38 @@ class LegadoRuleEvaluator {
         }
       },
       'javaTimeFormat': (args) {
-        final rawTs = args.isNotEmpty ? args[0] : null;
-        final ms = rawTs is num
-            ? rawTs.toInt()
-            : int.tryParse(rawTs?.toString() ?? '') ?? 0;
+        final ms = _coerceTimestampMs(args.isNotEmpty ? args[0] : null);
         return _formatTimestamp(ms, utc: false);
       },
       'javaTimeFormatUTC': (args) {
-        final rawTs = args.isNotEmpty ? args[0] : null;
-        final ms = rawTs is num
-            ? rawTs.toInt()
-            : int.tryParse(rawTs?.toString() ?? '') ?? 0;
-        final offset = args.length > 1 && args[1] is num
-            ? (args[1] as num).toInt()
-            : 0;
-        return _formatTimestamp(ms + offset * 3600 * 1000, utc: true);
+        final ms = _coerceTimestampMs(args.isNotEmpty ? args[0] : null);
+        var pattern = 'yyyy-MM-dd HH:mm:ss';
+        var offsetRaw = 0;
+        if (args.length == 2) {
+          final second = args[1];
+          final parsedNum = _tryParseInt(second);
+          if (parsedNum != null &&
+              (second is num ||
+                  RegExp(r'^[+-]?\d+$').hasMatch(second.toString().trim()))) {
+            offsetRaw = parsedNum;
+          } else if (second != null && second.toString().trim().isNotEmpty) {
+            pattern = second.toString();
+          }
+        } else if (args.length >= 3) {
+          final second = args[1];
+          if (second != null && second.toString().trim().isNotEmpty) {
+            pattern = second.toString();
+          }
+          offsetRaw = _tryParseInt(args[2]) ?? 0;
+        }
+        final offsetMs = offsetRaw.abs() <= 24
+            ? offsetRaw * 3600 * 1000
+            : offsetRaw;
+        return _formatTimestampWithPattern(
+          ms + offsetMs,
+          pattern: pattern,
+          utc: true,
+        );
       },
       'javaToNumChapter': (args) {
         final s = args.isNotEmpty ? (args[0]?.toString() ?? '') : '';
@@ -1258,6 +1575,74 @@ class LegadoRuleEvaluator {
             : '';
         return null;
       },
+      'bookGetVar': (args) {
+        final k = args.isNotEmpty ? (args[0]?.toString() ?? '') : '';
+        return session.bookVars[k] ?? '';
+      },
+      'bookPutVar': (args) {
+        final k = args.isNotEmpty ? (args[0]?.toString() ?? '') : '';
+        final v = args.length > 1 ? (args[1]?.toString() ?? '') : '';
+        session.bookVars[k] = v;
+        return v;
+      },
+      'bookGetVariableStr': (_) {
+        if (session.bookVariable.isNotEmpty) return session.bookVariable;
+        if (session.bookVars.isNotEmpty) return jsonEncode(session.bookVars);
+        return '';
+      },
+      'bookSetVariableStr': (args) {
+        final v = args.isNotEmpty ? (args[0]?.toString() ?? '') : '';
+        session.bookVariable = v;
+        if (v.trimLeft().startsWith('{')) {
+          try {
+            final decoded = jsonDecode(v);
+            if (decoded is Map) {
+              session.bookVars.clear();
+              for (final e in decoded.entries) {
+                session.bookVars[e.key.toString()] =
+                    e.value?.toString() ?? '';
+              }
+            }
+          } catch (_) {}
+        }
+        return null;
+      },
+      'bookGetCustomVariable': (_) {
+        if (session.bookCustomVariable.isNotEmpty) {
+          return session.bookCustomVariable;
+        }
+        return session.bookVars['custom'] ?? '';
+      },
+      'bookPutCustomVariable': (args) {
+        final v = args.isNotEmpty ? (args[0]?.toString() ?? '') : '';
+        session.bookCustomVariable = v;
+        return v;
+      },
+      'cacheGet': (args) {
+        final k = args.isNotEmpty ? (args[0]?.toString() ?? '') : '';
+        final entry = session.cacheEntries[k];
+        if (entry == null) return null;
+        if (entry.isExpired(DateTime.now().millisecondsSinceEpoch)) {
+          session.cacheEntries.remove(k);
+          return null;
+        }
+        return entry.value;
+      },
+      'cachePut': (args) {
+        final k = args.isNotEmpty ? (args[0]?.toString() ?? '') : '';
+        final v = args.length > 1 ? (args[1]?.toString() ?? '') : '';
+        final saveSeconds = args.length > 2 ? _tryParseInt(args[2]) : null;
+        final expiresAtMs = (saveSeconds != null && saveSeconds > 0)
+            ? DateTime.now().millisecondsSinceEpoch + saveSeconds * 1000
+            : null;
+        session.cacheEntries[k] = LegadoCacheEntry(v, expiresAtMs);
+        return null;
+      },
+      'cacheDelete': (args) {
+        final k = args.isNotEmpty ? (args[0]?.toString() ?? '') : '';
+        session.cacheEntries.remove(k);
+        return null;
+      },
     };
 
     final asyncHost = <String, HostAsyncCallback>{
@@ -1268,8 +1653,8 @@ class LegadoRuleEvaluator {
         final req = parseUrlSpec(
           rawUrl,
           baseUrl: activeBaseUrl,
-          defaultHeaders: src?.headers ?? const <String, String>{},
-          defaultCharset: src?.charset,
+          defaultHeaders: bookSource?.headers ?? const <String, String>{},
+          defaultCharset: bookSource?.charset,
         );
         if (req.webView) {
           throw UnsupportedLegadoRuleFailure(
@@ -1284,10 +1669,76 @@ class LegadoRuleEvaluator {
           data: req.body,
           headers: req.headers,
           charsetOverride: req.charset,
-          rateLimitMs: src?.rateLimitMs ?? 0,
+          rateLimitMs: bookSource?.rateLimitMs ?? 0,
           cancelToken: cancelToken,
         );
         return resp.body;
+      },
+      'legadoAjaxAll': (args) async {
+        final client = httpClient;
+        final rawList = args.isNotEmpty && args[0] is List
+            ? args[0] as List
+            : const <Object?>[];
+        if (rawList.isEmpty) return const <Map<String, Object?>>[];
+        if (client == null) {
+          return List<Map<String, Object?>>.generate(
+            rawList.length,
+            (_) => <String, Object?>{
+              'body': '',
+              'status': 0,
+              'url': '',
+              'headers': <String, String>{},
+            },
+          );
+        }
+        final results = List<Map<String, Object?>?>.filled(
+          rawList.length,
+          null,
+        );
+        var nextIdx = 0;
+        const maxConcurrency = 4;
+        final workerCount = rawList.length < maxConcurrency
+            ? rawList.length
+            : maxConcurrency;
+
+        Future<void> runWorker() async {
+          while (true) {
+            cancelToken?.throwIfCancelled();
+            final idx = nextIdx++;
+            if (idx >= rawList.length) return;
+            final rawUrl = rawList[idx]?.toString() ?? '';
+            final req = parseUrlSpec(
+              rawUrl,
+              baseUrl: activeBaseUrl,
+              defaultHeaders: bookSource?.headers ?? const <String, String>{},
+              defaultCharset: bookSource?.charset,
+            );
+            if (req.webView) {
+              throw UnsupportedLegadoRuleFailure(
+                message: 'Legado java.ajaxAll target requires webView: true',
+                feature: 'webView',
+                sourceId: sourceId,
+              );
+            }
+            final resp = await client.request(
+              req.url,
+              method: req.method,
+              data: req.body,
+              headers: req.headers,
+              charsetOverride: req.charset,
+              rateLimitMs: bookSource?.rateLimitMs ?? 0,
+              cancelToken: cancelToken,
+            );
+            results[idx] = _buildJsHttpResponseMap(resp, requestedUrl: req.url);
+          }
+        }
+
+        await Future.wait(
+          List<Future<void>>.generate(workerCount, (_) => runWorker()),
+        );
+        return results
+            .whereType<Map<String, Object?>>()
+            .toList(growable: false);
       },
       'legadoHttpGet': (args) async {
         final client = httpClient;
@@ -1301,7 +1752,7 @@ class LegadoRuleEvaluator {
         }
         final rawUrl = args.isNotEmpty ? (args[0]?.toString() ?? '') : '';
         final rawHeaders = args.length > 1 ? args[1] : null;
-        final hdrs = <String, String>{...?src?.headers};
+        final hdrs = <String, String>{...?bookSource?.headers};
         if (rawHeaders is Map) {
           for (final e in rawHeaders.entries) {
             hdrs[e.key.toString()] = e.value.toString();
@@ -1312,16 +1763,11 @@ class LegadoRuleEvaluator {
           resolved,
           method: 'GET',
           headers: hdrs,
-          charsetOverride: src?.charset,
-          rateLimitMs: src?.rateLimitMs ?? 0,
+          charsetOverride: bookSource?.charset,
+          rateLimitMs: bookSource?.rateLimitMs ?? 0,
           cancelToken: cancelToken,
         );
-        return <String, Object?>{
-          'body': resp.body,
-          'status': resp.statusCode,
-          'url': resp.finalUrl,
-          'headers': resp.headers,
-        };
+        return _buildJsHttpResponseMap(resp, requestedUrl: resolved);
       },
       'legadoHttpPost': (args) async {
         final client = httpClient;
@@ -1336,7 +1782,7 @@ class LegadoRuleEvaluator {
         final rawUrl = args.isNotEmpty ? (args[0]?.toString() ?? '') : '';
         final body = args.length > 1 ? args[1]?.toString() : null;
         final rawHeaders = args.length > 2 ? args[2] : null;
-        final hdrs = <String, String>{...?src?.headers};
+        final hdrs = <String, String>{...?bookSource?.headers};
         if (rawHeaders is Map) {
           for (final e in rawHeaders.entries) {
             hdrs[e.key.toString()] = e.value.toString();
@@ -1348,16 +1794,11 @@ class LegadoRuleEvaluator {
           method: 'POST',
           data: body,
           headers: hdrs,
-          charsetOverride: src?.charset,
-          rateLimitMs: src?.rateLimitMs ?? 0,
+          charsetOverride: bookSource?.charset,
+          rateLimitMs: bookSource?.rateLimitMs ?? 0,
           cancelToken: cancelToken,
         );
-        return <String, Object?>{
-          'body': resp.body,
-          'status': resp.statusCode,
-          'url': resp.finalUrl,
-          'headers': resp.headers,
-        };
+        return _buildJsHttpResponseMap(resp, requestedUrl: resolved);
       },
     };
 
@@ -1369,8 +1810,9 @@ class LegadoRuleEvaluator {
     );
 
     final prepared = _prepareLegadoJsBody(jsCode);
-    final jsLibPrefix = src?.jsLib != null && src!.jsLib!.trim().isNotEmpty
-        ? '${src.jsLib!}\n'
+    final jsLibPrefix =
+        bookSource?.jsLib != null && bookSource!.jsLib!.trim().isNotEmpty
+        ? '${bookSource.jsLib!}\n'
         : '';
 
     final wrapped = '''
@@ -1381,6 +1823,20 @@ function __normCryptoArg(v) {
     return Array.from(v);
   }
   return String(v);
+}
+function __coerceTarget(t) {
+  if (t == null) return null;
+  if (typeof t === "string") return t;
+  if (typeof t.outerHtml === "function") return t.outerHtml();
+  if (Array.isArray(t)) {
+    const out = [];
+    for (let i = 0; i < t.length; i++) {
+      const item = t[i];
+      out.push(item && typeof item.outerHtml === "function" ? item.outerHtml() : String(item));
+    }
+    return out;
+  }
+  return String(t);
 }
 function __wrapResp(r) {
   const hdrs = (r && r.headers) ? r.headers : {};
@@ -1401,25 +1857,125 @@ function __wrapResp(r) {
     raw: () => ({ request: () => ({ url: () => (r && r.url) ? String(r.url) : "" }) })
   };
 }
-const java = {
+${LegadoJsoupBridge.jsPrelude}
+Object.defineProperty(org.jsoup.nodes.Element.prototype, "toJSON", {
+  value: function(key) {
+    if (key === "") return { __pureReadOuterHtml: this.outerHtml() };
+    return this.outerHtml();
+  },
+  enumerable: false,
+  configurable: true,
+  writable: true
+});
+Jsoup.connect = function(u) {
+  const _url = String(u);
+  const _hdrs = {};
+  let _body = null;
+  const conn = {
+    userAgent: (ua) => { _hdrs["User-Agent"] = String(ua); return conn; },
+    referrer: (r) => { _hdrs["Referer"] = String(r); return conn; },
+    header: (k, v) => { _hdrs[String(k)] = String(v); return conn; },
+    headers: (m) => { if (m && typeof m === "object") Object.assign(_hdrs, m); return conn; },
+    timeout: () => conn,
+    ignoreContentType: () => conn,
+    ignoreHttpErrors: () => conn,
+    followRedirects: () => conn,
+    data: (k, v) => {
+      if (typeof k === "object") { _body = k; }
+      else { _body = (_body ? _body + "&" : "") + encodeURIComponent(k) + "=" + encodeURIComponent(v || ""); }
+      return conn;
+    },
+    get: () => Jsoup.parse("", _url),
+    post: () => Jsoup.parse("", _url),
+    __asyncGet: async () => {
+      const r = await host.legadoHttpGet(_url, _hdrs);
+      return Jsoup.parse(r && r.body ? String(r.body) : "", (r && r.url) ? String(r.url) : _url);
+    },
+    __asyncPost: async () => {
+      const r = await host.legadoHttpPost(_url, _body == null ? "" : (typeof _body === "string" ? _body : JSON.stringify(_body)), _hdrs);
+      return Jsoup.parse(r && r.body ? String(r.body) : "", (r && r.url) ? String(r.url) : _url);
+    }
+  };
+  return conn;
+};
+if (typeof __legadoResultBlocks !== "undefined" && Array.isArray(__legadoResultBlocks)) {
+  const __els = new org.jsoup.select.Elements();
+  for (let __i = 0; __i < __legadoResultBlocks.length; __i++) {
+    const __raw = String(__legadoResultBlocks[__i]);
+    if (/^\\s*<(tr|td|th|tbody|thead|tfoot)\\b/i.test(__raw)) {
+      const __tdoc = org.jsoup.Jsoup.parse("<table>" + __raw + "</table>", baseUrl);
+      const __picked = __tdoc.selectFirst("tr,td,th,tbody,thead,tfoot");
+      if (__picked) { __els.push(__picked); continue; }
+    }
+    const __doc = org.jsoup.Jsoup.parse(__raw, baseUrl);
+    const __body = __doc.selectFirst("body");
+    const __kids = __body ? __body.children() : __doc.children();
+    if (__kids && __kids.length > 0) {
+      for (let __j = 0; __j < __kids.length; __j++) {
+        __els.push(__kids[__j]);
+      }
+    } else {
+      __els.push(__doc);
+    }
+  }
+  result = __els;
+}
+var java = {
   put: (k, v) => host.javaPut(String(k), v == null ? "" : String(v)),
   get: (k) => host.javaGetVar(String(k)),
   __asyncAjax: async (u) => await host.legadoAjax(String(u)),
+  __asyncAjaxAll: async (urls) => (await host.legadoAjaxAll(Array.isArray(urls) ? urls.map(u => String(u)) : [])).map(__wrapResp),
   __asyncHttpGet: async (u, h) => __wrapResp(await host.legadoHttpGet(String(u), h || null)),
   __asyncHttpPost: async (u, b, h) => __wrapResp(await host.legadoHttpPost(String(u), b == null ? "" : String(b), h || null)),
-  __asyncConnect: async (u) => __wrapResp(await host.legadoHttpGet(String(u), null)),
+  __asyncConnect: async (u, h) => __wrapResp(await host.legadoHttpGet(String(u), h || null)),
   ajax: (u) => "",
-  connect: (u) => __wrapResp({}),
+  ajaxAll: (urls) => [],
+  connect: (u, h) => __wrapResp({}),
   post: (u, b, h) => __wrapResp({}),
-  setContent: (c) => { host.javaSetContent(c == null ? "" : String(c)); },
-  getString: (r) => host.javaGetString(String(r)),
-  getStringList: (r) => host.javaGetStringList(String(r)),
-  getElements: (r) => host.javaGetElements(String(r)),
-  getElement: (r) => host.javaGetElement(String(r)),
+  setContent: (c, u) => { host.javaSetContent(c == null ? "" : String(c), u == null ? null : String(u)); },
+  getString: (r, t) => host.javaGetString(String(r), __coerceTarget(t)),
+  getStringList: (r, t) => host.javaGetStringList(String(r), __coerceTarget(t)),
+  getElements: (r, t) => host.javaGetElements(String(r), __coerceTarget(t)),
+  getElement: (r, t) => host.javaGetElement(String(r), __coerceTarget(t)),
   md5Encode: (s) => host.md5(s == null ? "" : String(s)),
   md5Encode16: (s) => host.md5Encode16(s == null ? "" : String(s)),
   base64Encode: (s) => host.base64Encode(s == null ? "" : String(s)),
   base64Decode: (s) => host.base64Decode(s == null ? "" : String(s)),
+  digestHex: (d, alg) => host.digestHex(__normCryptoArg(d), alg == null ? "SHA-256" : String(alg)),
+  digestBase64: (d, alg) => host.digestBase64(__normCryptoArg(d), alg == null ? "SHA-256" : String(alg)),
+  sha256Encode: (s) => host.digestHex(s == null ? "" : String(s), "SHA-256"),
+  sha1Encode: (s) => host.digestHex(s == null ? "" : String(s), "SHA-1"),
+  sha512Encode: (s) => host.digestHex(s == null ? "" : String(s), "SHA-512"),
+  hexEncodeToString: (s) => host.hexEncode(__normCryptoArg(s)),
+  HMacHex: (d, alg, key) => host.hmacHex(__normCryptoArg(d), __normCryptoArg(key), String(alg)),
+  HMacBase64: (d, alg, key) => host.hmacBase64(__normCryptoArg(d), __normCryptoArg(key), String(alg)),
+  hmacHex: (d, alg, key) => host.hmacHex(__normCryptoArg(d), __normCryptoArg(key), String(alg)),
+  hmacBase64: (d, alg, key) => host.hmacBase64(__normCryptoArg(d), __normCryptoArg(key), String(alg)),
+  createDigest: (alg) => {
+    const _alg = alg == null ? "SHA-256" : String(alg);
+    return {
+      digestHex: (d) => host.digestHex(__normCryptoArg(d), _alg),
+      digestBase64: (d) => host.digestBase64(__normCryptoArg(d), _alg),
+      digest: (d) => host.javaDigestBytes(__normCryptoArg(d), _alg),
+    };
+  },
+  createHMac: (alg, key) => {
+    const _alg = alg == null ? "HmacSHA256" : String(alg);
+    const _k = __normCryptoArg(key);
+    return {
+      digestHex: (d) => host.hmacHex(__normCryptoArg(d), _k, _alg),
+      digestBase64: (d) => host.hmacBase64(__normCryptoArg(d), _k, _alg),
+      digest: (d) => host.javaHmacBytes(__normCryptoArg(d), _k, _alg),
+    };
+  },
+  randomUUID: () => host.javaRandomUUID(),
+  refreshTocUrl: () => {},
+  toURL: (u, b) => {
+    const parsed = host.javaToURL(u == null ? "" : String(u), b == null ? null : String(b));
+    parsed.toString = () => parsed.href;
+    return parsed;
+  },
+  htmlFormat: (h) => host.javaHtmlFormat(h == null ? "" : String(h)),
   strToBytes: (s) => host.strToBytes(s == null ? "" : String(s)),
   base64DecodeToByteArray: (s) => host.base64DecodeBytes(s == null ? "" : String(s)),
   hexDecodeToByteArray: (s) => host.hexDecodeBytes(s == null ? "" : String(s)),
@@ -1450,8 +2006,14 @@ const java = {
   hexDecodeToString: (s) => host.javaHexDecodeToString(s == null ? "" : String(s)),
   encodeURI: (s, enc) => host.javaEncodeURI(s == null ? "" : String(s), enc == null ? null : String(enc)),
   decodeURI: (s) => host.javaDecodeURI(s == null ? "" : String(s)),
-  timeFormat: (ts) => host.javaTimeFormat(ts || 0),
-  timeFormatUTC: (ts, off) => host.javaTimeFormatUTC(ts || 0, off || 0),
+  timeFormat: (ts) => host.javaTimeFormat((ts instanceof Date) ? ts.getTime() : (ts || 0)),
+  timeFormatUTC: function(ts, fmtOrOff, off) {
+    const _ts = (ts instanceof Date) ? ts.getTime() : (ts || 0);
+    if (off === undefined) {
+      return host.javaTimeFormatUTC(_ts, fmtOrOff == null ? 0 : fmtOrOff);
+    }
+    return host.javaTimeFormatUTC(_ts, fmtOrOff == null ? "yyyy-MM-dd HH:mm:ss" : String(fmtOrOff), off == null ? 0 : off);
+  },
   toNumChapter: (s) => host.javaToNumChapter(s == null ? "" : String(s)),
   t2s: (s) => s == null ? "" : String(s),
   s2t: (s) => s == null ? "" : String(s),
@@ -1461,43 +2023,69 @@ const java = {
   longToast: (msg) => { host.javaToast(msg == null ? "" : String(msg)); },
   getCookie: (u, k) => k ? host.cookieGetKey(String(u), String(k)) : host.cookieGetCookie(String(u))
 };
-const cookie = {
+var cookie = {
   getCookie: (u) => host.cookieGetCookie(String(u)),
   getKey: (u, k) => host.cookieGetKey(String(u), String(k)),
   setCookie: (u, v) => { host.cookieSetCookie(String(u), String(v)); },
   removeCookie: (u) => { host.cookieRemoveCookie(String(u)); }
 };
-const source = {
+var book = {
+  name: ${jsonEncode(session.bookName)},
+  bookUrl: ${jsonEncode(session.bookUrl)},
+  tocUrl: ${jsonEncode(session.tocUrl)},
+  get variable() { return host.bookGetVariableStr(); },
+  set variable(v) { host.bookSetVariableStr(v == null ? "" : String(v)); },
+  getVariable: (k) => host.bookGetVar(k == null ? "" : String(k)),
+  putVariable: (k, v) => host.bookPutVar(k == null ? "" : String(k), v == null ? "" : String(v)),
+  getCustomVariable: () => host.bookGetCustomVariable(),
+  putCustomVariable: (v) => host.bookPutCustomVariable(v == null ? "" : String(v)),
+  setReverseToc: () => {}
+};
+var cache = {
+  get: (k) => host.cacheGet(k == null ? "" : String(k)),
+  put: (k, v, saveSeconds) => { host.cachePut(k == null ? "" : String(k), v == null ? "" : String(v), saveSeconds == null ? null : Number(saveSeconds)); },
+  delete: (k) => { host.cacheDelete(k == null ? "" : String(k)); },
+  getFromMemory: (k) => host.cacheGet(k == null ? "" : String(k)),
+  putMemory: (k, v) => { host.cachePut(k == null ? "" : String(k), v == null ? "" : String(v), null); },
+  deleteMemory: (k) => { host.cacheDelete(k == null ? "" : String(k)); }
+};
+var source = {
   key: ${jsonEncode(rawSourceKey)},
   bookSourceUrl: ${jsonEncode(rawSourceKey)},
-  bookSourceName: ${jsonEncode(src?.bookSourceName ?? '')},
-  bookSourceComment: ${jsonEncode(src?.bookSourceComment ?? '')},
-  header: ${jsonEncode(src?.rawHeader ?? '')},
-  loginUrl: ${jsonEncode(src?.loginUrl ?? '')},
+  bookSourceName: ${jsonEncode(bookSource?.bookSourceName ?? '')},
+  bookSourceComment: ${jsonEncode(bookSource?.bookSourceComment ?? '')},
+  header: ${jsonEncode(bookSource?.rawHeader ?? '')},
+  loginUrl: ${jsonEncode(bookSource?.loginUrl ?? '')},
   getKey: () => ${jsonEncode(rawSourceKey)},
   getVariable: () => host.sourceGetVariable(),
-  setVariable: (v) => { host.sourceSetVariable(v == null ? "" : String(v)); }
+  setVariable: (v) => { host.sourceSetVariable(v == null ? "" : String(v)); },
+  put: (k, v) => host.javaPut(String(k), v == null ? "" : String(v)),
+  get: (k) => host.javaGetVar(String(k)),
+  getHeaderMap: () => (${jsonEncode(bookSource?.headers ?? const <String, String>{})}),
+  getLoginInfo: () => "",
+  getLoginInfoMap: () => ({}),
+  getLoginHeader: () => "",
+  getLoginHeaderMap: () => ({})
 };
 $jsLibPrefix$prepared
 ''';
 
     final bindings = <String, Object?>{
       'result': effectiveResult,
+      'src': effectiveSrc,
       'baseUrl': activeBaseUrl,
       'key': keyword ?? '',
       'page': page ?? 1,
-      'book': <String, Object?>{
-        'name': session.bookName,
-        'bookUrl': session.bookUrl,
-        'tocUrl': session.tocUrl,
-        'variable': '',
-      },
+      'title': session.chapterTitle,
       'chapter': <String, Object?>{
         'title': session.chapterTitle,
         'url': session.chapterUrl,
         'index': session.chapterIndex,
       },
     };
+    if (elementBlocks != null) {
+      bindings['__legadoResultBlocks'] = elementBlocks;
+    }
     if (resolvedGroups != null) {
       for (var idx = 0; idx < resolvedGroups.length; idx++) {
         bindings['\$$idx'] = resolvedGroups[idx];
@@ -1512,21 +2100,34 @@ $jsLibPrefix$prepared
         cancelToken: cancelToken,
       );
       session.logs.addAll(res.logs);
-      return res.value.trim();
+      final rawOut = res.value.trim();
+      if (rawOut.startsWith('{"__pureReadOuterHtml":')) {
+        try {
+          final decoded = jsonDecode(rawOut);
+          if (decoded is Map && decoded.containsKey('__pureReadOuterHtml')) {
+            return (decoded['__pureReadOuterHtml']?.toString() ?? '').trim();
+          }
+        } catch (_) {}
+      }
+      return rawOut;
     } finally {
+      jsoupBridge.dispose();
       await runtime.dispose();
     }
   }
 
-  /// Rewrites synchronous-looking `java.ajax(...)`, `java.post(...)`,
-  /// `java.connect(...)`, and 2-arg `java.get(url, headers)` into `await`
-  /// calls inside an async IIFE when present, leaving pure sync scripts untouched
+  /// Rewrites synchronous-looking `java.ajax(...)`, `java.ajaxAll(...)`,
+  /// `java.post(...)`, `java.connect(...)`, 2-arg `java.get(url, headers)`,
+  /// and `Jsoup.connect(...)` `.get()`/`.post()` chains into `await` calls
+  /// inside an async IIFE when present, leaving pure sync scripts untouched
   /// so QuickJS natively returns the final expression completion value.
   static String _prepareLegadoJsBody(String jsCode) {
     final hasAsyncCall =
         jsCode.contains('java.ajax(') ||
+        jsCode.contains('java.ajaxAll(') ||
         jsCode.contains('java.connect(') ||
         jsCode.contains('java.post(') ||
+        jsCode.contains('Jsoup.connect(') ||
         RegExp(r'java\.get\s*\([^,)]+,').hasMatch(jsCode);
     if (!hasAsyncCall) {
       return jsCode;
@@ -1567,6 +2168,12 @@ $jsLibPrefix$prepared
             i = end + 2;
             continue;
           }
+          final regexEnd = _findJsRegexLiteralEnd(code, i, code.length);
+          if (regexEnd != -1) {
+            out.write(code.substring(i, regexEnd));
+            i = regexEnd;
+            continue;
+          }
         }
 
         if (ch == "'") {
@@ -1588,9 +2195,23 @@ $jsLibPrefix$prepared
           continue;
         }
 
+        if (code.startsWith('Packages.org.jsoup.Jsoup.connect(', i) ||
+            code.startsWith('org.jsoup.Jsoup.connect(', i) ||
+            code.startsWith('Jsoup.connect(', i)) {
+          final rewrittenConnect = _tryRewriteJsoupConnectChain(code, i);
+          if (rewrittenConnect != null) {
+            out.write(rewrittenConnect.replacement);
+            i = rewrittenConnect.nextIndex;
+            continue;
+          }
+        }
+
         String? target;
         String? replacementPrefix;
-        if (code.startsWith('java.ajax(', i)) {
+        if (code.startsWith('java.ajaxAll(', i)) {
+          target = 'java.ajaxAll(';
+          replacementPrefix = '(await java.__asyncAjaxAll(';
+        } else if (code.startsWith('java.ajax(', i)) {
           target = 'java.ajax(';
           replacementPrefix = '(await java.__asyncAjax(';
         } else if (code.startsWith('java.connect(', i)) {
@@ -1648,40 +2269,33 @@ $jsLibPrefix$prepared
     final lastSemi = _findLastStatementSplitSemicolon(trimmed);
     final prefix = lastSemi == -1 ? '' : trimmed.substring(0, lastSemi + 1);
     final tail = lastSemi == -1 ? trimmed : trimmed.substring(lastSemi + 1);
+    final tailTrimmed = tail.trim();
+    if (tailTrimmed.isEmpty) return trimmed;
 
-    final lines = tail.split('\n');
-    for (var idx = lines.length - 1; idx >= 0; idx--) {
-      final line = lines[idx].trim();
-      if (line.isEmpty || line.startsWith('//')) continue;
-      if (line.startsWith('return ') ||
-          line.startsWith('throw ') ||
-          line.startsWith('var ') ||
-          line.startsWith('let ') ||
-          line.startsWith('const ') ||
-          line.startsWith('if') ||
-          line.startsWith('for') ||
-          line.startsWith('while') ||
-          line.startsWith('do') ||
-          line.startsWith('switch') ||
-          line.startsWith('try') ||
-          line.startsWith('function ') ||
-          line.startsWith('{') ||
-          line.endsWith('}')) {
-        return trimmed;
-      }
-      final cleanExpr = line.endsWith(';')
-          ? line.substring(0, line.length - 1).trim()
-          : line;
-      if (cleanExpr.isNotEmpty) {
-        final leadingSpace = lines[idx].substring(
-          0,
-          lines[idx].length - lines[idx].trimLeft().length,
-        );
-        lines[idx] = '${leadingSpace}return ($cleanExpr);';
-      }
-      return '$prefix${lines.join('\n')}';
+    final firstLine = tailTrimmed
+        .split('\n')
+        .map((l) => l.trim())
+        .firstWhere((l) => l.isNotEmpty && !l.startsWith('//'), orElse: () => '');
+    if (firstLine.isEmpty ||
+        firstLine.startsWith('return ') ||
+        firstLine.startsWith('throw ') ||
+        firstLine.startsWith('var ') ||
+        firstLine.startsWith('let ') ||
+        firstLine.startsWith('const ') ||
+        RegExp(r'^(?:if|for|while|do|switch|try)\b').hasMatch(firstLine) ||
+        firstLine.startsWith('function ') ||
+        firstLine.startsWith('{') ||
+        tailTrimmed.endsWith('}')) {
+      return trimmed;
     }
-    return trimmed;
+
+    final cleanTail = tailTrimmed.endsWith(';')
+        ? tailTrimmed.substring(0, tailTrimmed.length - 1).trimRight()
+        : tailTrimmed;
+    if (cleanTail.isEmpty) return trimmed;
+
+    final leadingSpace = tail.substring(0, tail.length - tail.trimLeft().length);
+    return '$prefix${leadingSpace}return ($cleanTail);';
   }
 
   static int _findLastStatementSplitSemicolon(String code) {
@@ -1711,6 +2325,11 @@ $jsLibPrefix$prepared
             final end = code.indexOf('*/', i + 2);
             if (end == -1 || end + 1 >= effectiveEnd) break;
             i = end + 1;
+            continue;
+          }
+          final regexEnd = _findJsRegexLiteralEnd(code, i, effectiveEnd);
+          if (regexEnd != -1) {
+            i = regexEnd - 1;
             continue;
           }
         }
@@ -1750,6 +2369,25 @@ $jsLibPrefix$prepared
     for (var i = openIdx; i < code.length; i++) {
       final ch = code[i];
       if (!inSingle && !inDouble && !inTemplate) {
+        if (ch == '/' && i + 1 < code.length) {
+          if (code[i + 1] == '/') {
+            final nl = code.indexOf('\n', i);
+            if (nl == -1) break;
+            i = nl;
+            continue;
+          }
+          if (code[i + 1] == '*') {
+            final end = code.indexOf('*/', i + 2);
+            if (end == -1) break;
+            i = end + 1;
+            continue;
+          }
+          final regexEnd = _findJsRegexLiteralEnd(code, i, code.length);
+          if (regexEnd != -1) {
+            i = regexEnd - 1;
+            continue;
+          }
+        }
         if (ch == "'") {
           inSingle = true;
         } else if (ch == '"') {
@@ -1779,13 +2417,35 @@ $jsLibPrefix$prepared
     var depth = 0;
     var inSingle = false;
     var inDouble = false;
+    var inTemplate = false;
     for (var i = 0; i < argsText.length; i++) {
       final ch = argsText[i];
-      if (!inSingle && !inDouble) {
+      if (!inSingle && !inDouble && !inTemplate) {
+        if (ch == '/' && i + 1 < argsText.length) {
+          if (argsText[i + 1] == '/') {
+            final nl = argsText.indexOf('\n', i);
+            if (nl == -1) break;
+            i = nl;
+            continue;
+          }
+          if (argsText[i + 1] == '*') {
+            final end = argsText.indexOf('*/', i + 2);
+            if (end == -1) break;
+            i = end + 1;
+            continue;
+          }
+          final regexEnd = _findJsRegexLiteralEnd(argsText, i, argsText.length);
+          if (regexEnd != -1) {
+            i = regexEnd - 1;
+            continue;
+          }
+        }
         if (ch == "'") {
           inSingle = true;
         } else if (ch == '"') {
           inDouble = true;
+        } else if (ch == '`') {
+          inTemplate = true;
         } else if (ch == '(' || ch == '[' || ch == '{') {
           depth++;
         } else if (ch == ')' || ch == ']' || ch == '}') {
@@ -1800,10 +2460,92 @@ $jsLibPrefix$prepared
         }
         if (inSingle && ch == "'") inSingle = false;
         if (inDouble && ch == '"') inDouble = false;
+        if (inTemplate && ch == '`') inTemplate = false;
       }
     }
     return false;
   }
+
+  static const Set<String> _regexPrefixKeywords = <String>{
+    'return',
+    'throw',
+    'case',
+    'delete',
+    'void',
+    'typeof',
+    'in',
+    'instanceof',
+    'new',
+    'else',
+    'do',
+    'await',
+    'yield',
+  };
+
+  static bool _canStartJsRegexLiteral(String code, int slashIdx) {
+    var k = slashIdx - 1;
+    while (k >= 0 && _isWhitespaceChar(code.codeUnitAt(k))) {
+      k--;
+    }
+    if (k < 0) return true;
+    final prev = code.codeUnitAt(k);
+    if (prev == 0x29 /* ) */ ||
+        prev == 0x5D /* ] */ ||
+        prev == 0x27 /* ' */ ||
+        prev == 0x22 /* " */ ||
+        prev == 0x60 /* ` */) {
+      return false;
+    }
+    if ((prev == 0x2B /* + */ || prev == 0x2D /* - */) &&
+        k > 0 &&
+        code.codeUnitAt(k - 1) == prev) {
+      return false;
+    }
+    if (_isJsIdentPart(prev)) {
+      var start = k;
+      while (start > 0 && _isJsIdentPart(code.codeUnitAt(start - 1))) {
+        start--;
+      }
+      final token = code.substring(start, k + 1);
+      return _regexPrefixKeywords.contains(token);
+    }
+    return true;
+  }
+
+  static int _findJsRegexLiteralEnd(String code, int slashIdx, int limit) {
+    if (slashIdx + 1 >= limit || code[slashIdx] != '/') return -1;
+    final next = code[slashIdx + 1];
+    if (next == '/' || next == '*') return -1;
+    if (!_canStartJsRegexLiteral(code, slashIdx)) return -1;
+
+    var inCharClass = false;
+    for (var j = slashIdx + 1; j < limit; j++) {
+      final c = code[j];
+      if (c == '\n' || c == '\r') return -1;
+      if (c == r'\') {
+        if (j + 1 >= limit) return -1;
+        final escaped = code[j + 1];
+        if (escaped == '\n' || escaped == '\r') return -1;
+        j++;
+        continue;
+      }
+      if (c == '[' && !inCharClass) {
+        inCharClass = true;
+      } else if (c == ']' && inCharClass) {
+        inCharClass = false;
+      } else if (c == '/' && !inCharClass) {
+        var end = j + 1;
+        while (end < limit && _isAsciiAlpha(code.codeUnitAt(end))) {
+          end++;
+        }
+        return end;
+      }
+    }
+    return -1;
+  }
+
+  static bool _isAsciiAlpha(int unit) =>
+      (unit >= 0x41 && unit <= 0x5A) || (unit >= 0x61 && unit <= 0x7A);
 
   static List<_RuleStage> _parseStages(String rule) {
     final stages = <_RuleStage>[];
@@ -1880,16 +2622,24 @@ $jsLibPrefix$prepared
         sourceId: sourceId,
       );
     }
-    if (rule.contains('Packages.') ||
-        RegExp(r'\bjava\.lang\.').hasMatch(rule) ||
-        rule.contains('importClass(') ||
-        rule.contains('org.jsoup.')) {
+    if (LegadoSourceParser.hasUnsupportedRhinoApi(rule)) {
       throw UnsupportedLegadoRuleFailure(
         message: 'Legado rule uses unsupported Rhino Java API: $rule',
         feature: 'rhino_java_api',
         sourceId: sourceId,
       );
     }
+  }
+
+  static String resolveUrlSpec(String rawSpec, String baseUrl) {
+    final trimmed = rawSpec.trim();
+    if (trimmed.isEmpty) return '';
+    final split = _splitUrlAndOptions(trimmed);
+    if (split == null) {
+      return SourceHttpClient.resolveUrl(trimmed, baseUrl);
+    }
+    final resolvedUrl = SourceHttpClient.resolveUrl(split.urlPart, baseUrl);
+    return '$resolvedUrl,${split.optionsPart}';
   }
 
   static ({String urlPart, String optionsPart})? _splitUrlAndOptions(
@@ -2165,5 +2915,278 @@ $jsLibPrefix$prepared
       }
     }
     return total + section + number;
+  }
+
+  static final RegExp _bareJsonPathPattern = RegExp(
+    r'^[a-zA-Z_][a-zA-Z0-9_]*(?:\.[a-zA-Z0-9_*]+|\[\*\]|\[\d+\])*$',
+  );
+  static final Random _secureRandom = Random.secure();
+
+  static bool _isMustacheTemplateRule(String rule) {
+    final trimmed = rule.trim();
+    if (!trimmed.contains('{{') &&
+        !trimmed.contains(r'{$.') &&
+        !trimmed.contains('{@@')) {
+      return false;
+    }
+    final (:selectorPart, regexSpec: _) =
+        LegadoSelectorEngine.splitTrailingRegex(trimmed);
+    final matches = _findMustacheExpressions(selectorPart);
+    final buf = StringBuffer();
+    var cursor = 0;
+    for (final m in matches) {
+      buf.write(selectorPart.substring(cursor, m.start));
+      cursor = m.end;
+    }
+    buf.write(selectorPart.substring(cursor));
+    final stripped = buf
+        .toString()
+        .replaceAll(RegExp(r'\{(?:\$\.[^}]+|@@[^}]+)\}'), '')
+        .trim();
+    if (stripped.isEmpty) return true;
+    if (stripped.contains('@') ||
+        stripped.startsWith('//') ||
+        stripped.startsWith('./') ||
+        stripped.startsWith(r'$.') ||
+        stripped.startsWith(r'$[') ||
+        stripped.startsWith('class.') ||
+        stripped.startsWith('id.') ||
+        stripped.startsWith('tag.') ||
+        stripped.startsWith('text.') ||
+        stripped.startsWith('children') ||
+        stripped.startsWith('#') ||
+        stripped.startsWith('.')) {
+      return false;
+    }
+    return true;
+  }
+
+  static bool _isJsonInput(String input) {
+    final trimmed = input.trimLeft();
+    if (!trimmed.startsWith('{') && !trimmed.startsWith('[')) return false;
+    try {
+      final decoded = jsonDecode(trimmed);
+      return decoded is Map || decoded is List;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  static String _normalizeRuleForInput(String input, String rule) {
+    final trimmed = rule.trim();
+    if (trimmed.isEmpty || !_isJsonInput(input)) return rule;
+    return _normalizeJsonCombinatorRule(trimmed);
+  }
+
+  static String _normalizeJsonCombinatorRule(String rule) {
+    final orParts = LegadoSelectorEngine.splitTopLevel(rule, '||');
+    if (orParts.length > 1) {
+      return orParts.map(_normalizeJsonCombinatorRule).join('||');
+    }
+    final andParts = LegadoSelectorEngine.splitTopLevel(rule, '&&');
+    if (andParts.length > 1) {
+      return andParts.map(_normalizeJsonCombinatorRule).join('&&');
+    }
+    final zipParts = LegadoSelectorEngine.splitTopLevel(rule, '%%');
+    if (zipParts.length > 1) {
+      return zipParts.map(_normalizeJsonCombinatorRule).join('%%');
+    }
+
+    final (:selectorPart, :regexSpec) = LegadoSelectorEngine.splitTrailingRegex(
+      rule,
+    );
+    final sel = selectorPart.trim();
+    if (sel.isEmpty ||
+        sel.startsWith('class.') ||
+        sel.startsWith('id.') ||
+        sel.startsWith('tag.') ||
+        sel.startsWith('text.') ||
+        sel == 'children' ||
+        !_bareJsonPathPattern.hasMatch(sel)) {
+      return rule;
+    }
+    final normalizedSel = '\$.$sel';
+    return regexSpec.isEmpty ? normalizedSel : '$normalizedSel##$regexSpec';
+  }
+
+  static String _coerceJsTargetToString(Object? target) {
+    if (target == null) return '';
+    if (target is String) return target;
+    if (target is List) {
+      return target.map(_coerceJsTargetToString).join('\n');
+    }
+    if (target is Map) return jsonEncode(target);
+    return target.toString();
+  }
+
+  static Map<String, Object?> _buildJsHttpResponseMap(
+    HttpFetchResult resp, {
+    required String requestedUrl,
+  }) {
+    var finalUrl = resp.finalUrl;
+    final parsedFinal = Uri.tryParse(finalUrl);
+    if (parsedFinal != null && parsedFinal.path.isEmpty) {
+      finalUrl = parsedFinal.replace(path: '/').toString();
+    }
+    final hdrs = <String, String>{...resp.headers};
+    if (!hdrs.containsKey('location')) {
+      if (resp.redirectLocation != null && resp.redirectLocation!.isNotEmpty) {
+        hdrs['location'] = resp.redirectLocation!;
+      } else if (finalUrl.isNotEmpty &&
+          Uri.tryParse(finalUrl) != Uri.tryParse(requestedUrl)) {
+        hdrs['location'] = finalUrl;
+      }
+    }
+    return <String, Object?>{
+      'body': resp.body,
+      'status': resp.statusCode,
+      'url': finalUrl,
+      'headers': hdrs,
+    };
+  }
+
+  static ({String replacement, int nextIndex})? _tryRewriteJsoupConnectChain(
+    String code,
+    int start,
+  ) {
+    final openIdx = code.indexOf('(', start);
+    if (openIdx == -1) return null;
+    final closeIdx = _findMatchingParen(code, openIdx);
+    if (closeIdx == -1) return null;
+
+    final prefix = code.substring(start, openIdx + 1);
+    final connectArg = _rewriteAsyncHttpCalls(
+      code.substring(openIdx + 1, closeIdx),
+    );
+    final chainBuf = StringBuffer()..write('$prefix$connectArg)');
+    var cursor = closeIdx + 1;
+
+    while (cursor < code.length) {
+      var ws = cursor;
+      while (ws < code.length && _isWhitespaceChar(code.codeUnitAt(ws))) {
+        ws++;
+      }
+      if (ws >= code.length || code.codeUnitAt(ws) != 0x2E) break;
+      final dotPos = ws;
+      var identStart = dotPos + 1;
+      while (identStart < code.length &&
+          _isWhitespaceChar(code.codeUnitAt(identStart))) {
+        identStart++;
+      }
+      var identEnd = identStart;
+      while (identEnd < code.length &&
+          _isJsIdentPart(code.codeUnitAt(identEnd))) {
+        identEnd++;
+      }
+      if (identEnd == identStart) break;
+      final ident = code.substring(identStart, identEnd);
+      var parenStart = identEnd;
+      while (parenStart < code.length &&
+          _isWhitespaceChar(code.codeUnitAt(parenStart))) {
+        parenStart++;
+      }
+      if (parenStart >= code.length || code.codeUnitAt(parenStart) != 0x28) {
+        break;
+      }
+      final parenEnd = _findMatchingParen(code, parenStart);
+      if (parenEnd == -1) break;
+
+      final callArgs = code.substring(parenStart + 1, parenEnd);
+      if ((ident == 'get' || ident == 'post') && callArgs.trim().isEmpty) {
+        final methodSuffix = ident == 'get' ? '__asyncGet()' : '__asyncPost()';
+        return (
+          replacement: '(await $chainBuf.$methodSuffix)',
+          nextIndex: parenEnd + 1,
+        );
+      }
+      chainBuf.write(code.substring(cursor, parenStart + 1));
+      chainBuf.write(_rewriteAsyncHttpCalls(callArgs));
+      chainBuf.write(')');
+      cursor = parenEnd + 1;
+    }
+
+    return null;
+  }
+
+  static bool _isWhitespaceChar(int code) =>
+      code == 0x20 || code == 0x09 || code == 0x0A || code == 0x0D;
+
+  static bool _isJsIdentPart(int code) =>
+      (code >= 0x41 && code <= 0x5A) ||
+      (code >= 0x61 && code <= 0x7A) ||
+      (code >= 0x30 && code <= 0x39) ||
+      code == 0x5F ||
+      code == 0x24;
+
+  static int _coerceTimestampMs(Object? raw) {
+    if (raw == null) return 0;
+    if (raw is int) return raw;
+    if (raw is num) return raw.isFinite ? raw.toInt() : 0;
+    final text = raw.toString().trim();
+    if (text.isEmpty) return 0;
+    final asNum = num.tryParse(text);
+    if (asNum != null && asNum.isFinite) return asNum.toInt();
+    return DateTime.tryParse(text)?.millisecondsSinceEpoch ?? 0;
+  }
+
+  static int? _tryParseInt(Object? raw) {
+    if (raw == null) return null;
+    if (raw is int) return raw;
+    if (raw is num) return raw.isFinite ? raw.toInt() : null;
+    return num.tryParse(raw.toString().trim())?.toInt();
+  }
+
+  static String _formatTimestampWithPattern(
+    int ms, {
+    required String pattern,
+    required bool utc,
+  }) {
+    final dt = DateTime.fromMillisecondsSinceEpoch(ms, isUtc: utc);
+    final y = dt.year.toString().padLeft(4, '0');
+    final m = dt.month.toString().padLeft(2, '0');
+    final d = dt.day.toString().padLeft(2, '0');
+    final hh = dt.hour.toString().padLeft(2, '0');
+    final mm = dt.minute.toString().padLeft(2, '0');
+    final ss = dt.second.toString().padLeft(2, '0');
+    return pattern
+        .replaceAll('yyyy', y)
+        .replaceAll('MM', m)
+        .replaceAll('dd', d)
+        .replaceAll('HH', hh)
+        .replaceAll('mm', mm)
+        .replaceAll('ss', ss);
+  }
+
+  static String _generateUuidV4() {
+    final bytes = List<int>.generate(16, (_) => _secureRandom.nextInt(256));
+    bytes[6] = (bytes[6] & 0x0F) | 0x40;
+    bytes[8] = (bytes[8] & 0x3F) | 0x80;
+    final hex = JsCryptoHelpers.hexEncode(bytes);
+    return '${hex.substring(0, 8)}-${hex.substring(8, 12)}-'
+        '${hex.substring(12, 16)}-${hex.substring(16, 20)}-'
+        '${hex.substring(20, 32)}';
+  }
+
+  /// Strips HTML tags and normalizes block newlines and entities into readable
+  /// plain text (`java.htmlFormat`).
+  static String formatHtmlText(String rawHtml) {
+    if (rawHtml.trim().isEmpty) return '';
+    final normalized = rawHtml
+        .replaceAll(RegExp(r'<br\s*/?>', caseSensitive: false), '\n')
+        .replaceAll(
+          RegExp(r'</?(?:p|div|li|tr|h[1-6]|blockquote)\b[^>]*>', caseSensitive: false),
+          '\n',
+        );
+    final frag = html_parser.parseFragment(normalized);
+    final text = (frag.text ?? '')
+        .replaceAll('\u00A0', ' ')
+        .replaceAll('\r\n', '\n')
+        .replaceAll('\r', '\n');
+    final lines = text
+        .split('\n')
+        .map((l) => l.replaceAll(RegExp(r'[ \t]+'), ' ').trim())
+        .where((l) => l.isNotEmpty)
+        .toList(growable: false);
+    return lines.join('\n');
   }
 }
