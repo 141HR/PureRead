@@ -72,7 +72,7 @@ final routerProvider = Provider<GoRouter>((ref) {
         parentNavigatorKey: rootNavigatorKey,
         path: AppRoutes.reader,
         builder: (context, state) {
-          final bookId = state.pathParameters['bookId'] ?? 'demo';
+          final bookId = state.pathParameters['bookId'] ?? '';
           return ReaderPage(bookId: bookId);
         },
       ),

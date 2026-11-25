@@ -226,29 +226,11 @@ class _ReaderPageState extends ConsumerState<ReaderPage>
       padding: EdgeInsets.fromLTRB(horizontalPad, 8, horizontalPad, 2),
       child: Row(
         children: [
-          if (state.isDemoPreview) ...[
-            Flexible(
-              fit: FlexFit.loose,
-              child: Text(
-                bookTitle,
-                maxLines: 1,
-                overflow: TextOverflow.ellipsis,
-                style: TextStyle(
-                  color: secondaryColor,
-                  fontSize: 12,
-                  fontWeight: FontWeight.w600,
-                ),
-              ),
-            ),
-            const SizedBox(width: 10),
-          ],
           Expanded(
             child: Text(
-              state.isDemoPreview
-                  ? chapterTitle
-                  : (bookTitle.isNotEmpty && chapterTitle != bookTitle
-                        ? '$bookTitle · $chapterTitle'
-                        : chapterTitle),
+              bookTitle.isNotEmpty && chapterTitle != bookTitle
+                  ? '$bookTitle · $chapterTitle'
+                  : chapterTitle,
               maxLines: 1,
               overflow: TextOverflow.ellipsis,
               style: TextStyle(color: secondaryColor, fontSize: 12),
@@ -276,28 +258,11 @@ class _ReaderPageState extends ConsumerState<ReaderPage>
         child: Row(
           children: [
             Expanded(
-              child: Row(
-                children: [
-                  if (state.isDemoPreview) ...[
-                    Flexible(
-                      child: Text(
-                        '左栏逻辑页 P(2k)',
-                        maxLines: 1,
-                        overflow: TextOverflow.ellipsis,
-                        style: TextStyle(color: secondaryColor, fontSize: 11),
-                      ),
-                    ),
-                    const SizedBox(width: 8),
-                  ],
-                  Flexible(
-                    child: Text(
-                      totalPages > 0 ? '第 $leftIdx / $totalPages 页' : '0/0',
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
-                      style: TextStyle(color: secondaryColor, fontSize: 11),
-                    ),
-                  ),
-                ],
+              child: Text(
+                totalPages > 0 ? '第 $leftIdx / $totalPages 页' : '0/0',
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: TextStyle(color: secondaryColor, fontSize: 11),
               ),
             ),
             const SizedBox(width: 16),
@@ -306,37 +271,17 @@ class _ReaderPageState extends ConsumerState<ReaderPage>
                 mainAxisAlignment: MainAxisAlignment.spaceBetween,
                 children: [
                   Flexible(
-                    child: Row(
-                      mainAxisSize: MainAxisSize.min,
-                      children: [
-                        if (state.isDemoPreview) ...[
-                          Flexible(
-                            child: Text(
-                              '右栏逻辑页 P(2k+1)',
-                              maxLines: 1,
-                              overflow: TextOverflow.ellipsis,
-                              style: TextStyle(
-                                color: secondaryColor,
-                                fontSize: 11,
-                              ),
+                    child: rightIdx != null
+                        ? Text(
+                            '第 $rightIdx 页',
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                            style: TextStyle(
+                              color: secondaryColor,
+                              fontSize: 11,
                             ),
-                          ),
-                          const SizedBox(width: 8),
-                        ],
-                        if (rightIdx != null)
-                          Flexible(
-                            child: Text(
-                              '第 $rightIdx 页',
-                              maxLines: 1,
-                              overflow: TextOverflow.ellipsis,
-                              style: TextStyle(
-                                color: secondaryColor,
-                                fontSize: 11,
-                              ),
-                            ),
-                          ),
-                      ],
-                    ),
+                          )
+                        : const SizedBox.shrink(),
                   ),
                   const SizedBox(width: 8),
                   Flexible(
@@ -701,7 +646,6 @@ class _ReaderPageState extends ConsumerState<ReaderPage>
             return ReaderBookmarksSheet(
               bookmarks: latest.bookmarks,
               chapters: latest.chapters,
-              isDemoPreview: latest.isDemoPreview,
               onAddBookmark: (note) => controller.addBookmark(note: note),
               onSelectBookmark: controller.jumpToBookmark,
               onDeleteBookmark: controller.deleteBookmark,
@@ -714,7 +658,7 @@ class _ReaderPageState extends ConsumerState<ReaderPage>
 
   bool _isOnlineBook(ReaderSessionState state) {
     final book = state.book;
-    if (book == null || state.isDemoPreview) return false;
+    if (book == null) return false;
     return book.providerType == ProviderType.jsPlugin ||
         book.providerType == ProviderType.legado;
   }

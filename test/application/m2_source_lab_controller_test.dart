@@ -10,6 +10,7 @@ import 'package:pureread/application/source_lab/replace_rules_controller.dart';
 import 'package:pureread/application/source_lab/source_debug_controller.dart';
 import 'package:pureread/application/source_lab/source_debug_state.dart';
 import 'package:pureread/application/source_lab/sources_controller.dart';
+import 'package:pureread/application/source_lab/sources_state.dart';
 import 'package:pureread/domain/domain.dart';
 import 'package:pureread/engine/source_engine/sanitizer/sanitizer.dart';
 
@@ -363,6 +364,39 @@ function search(k) { return []; }
 
       await ctrl.deleteSource(jsSource.id);
       expect(container.read(sourcesControllerProvider).sources.length, 1);
+    });
+
+    test('SourcesState splits composite Legado groups, strips dividers, and sorts by count', () {
+      expect(
+        SourcesState.parseGroupTags('-------,0206⭐,最终精简版, 0206⭐ '),
+        <String>['0206⭐', '最终精简版'],
+      );
+      expect(SourcesState.parseGroupTags('-------; === ; '), <String>['默认']);
+
+      final s1 = BookSource(
+        id: 'g1',
+        name: 'S1',
+        groupName: '-------,0206⭐,9.28校验',
+        engineType: SourceEngineType.legado,
+        baseUrl: 'https://g1.example.com',
+        rawDefinition: '{}',
+        createdAt: DateTime.utc(2026),
+        updatedAt: DateTime.utc(2026),
+      );
+      final s2 = s1.copyWith(id: 'g2', name: 'S2', groupName: '9.28校验,精品');
+      final s3 = s1.copyWith(id: 'g3', name: 'S3', groupName: '9.28校验');
+      final s4 = s1.copyWith(id: 'g4', name: 'S4', groupName: '---');
+
+      final st = SourcesState(
+        sources: <BookSource>[s1, s2, s3, s4],
+        selectedGroup: '0206⭐',
+      );
+      expect(st.groups.first, '全部');
+      expect(st.groups[1], '9.28校验');
+      expect(st.countForGroup('9.28校验'), 3);
+      expect(st.countForGroup('0206⭐'), 1);
+      expect(st.countForGroup('默认'), 1);
+      expect(st.filteredSources.map((s) => s.id).toList(), <String>['g1']);
     });
   });
 

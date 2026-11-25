@@ -204,7 +204,9 @@ void main() {
 
     expect(find.text('书架暂无书籍'), findsOneWidget);
     expect(find.text('导入本地 TXT'), findsOneWidget);
-    expect(find.text('预览阅读器占位页'), findsOneWidget);
+    expect(find.text('导入 EPUB'), findsOneWidget);
+    expect(find.text('预览阅读器占位页'), findsNothing);
+    expect(find.textContaining('精准 charOffset 锚点'), findsNothing);
 
     await tester.tap(find.text('导入本地 TXT'));
     await tester.pumpAndSettle();

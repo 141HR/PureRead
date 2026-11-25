@@ -8,7 +8,6 @@ class ReaderBookmarksSheet extends StatefulWidget {
     super.key,
     required this.bookmarks,
     required this.chapters,
-    required this.isDemoPreview,
     required this.onAddBookmark,
     required this.onSelectBookmark,
     required this.onDeleteBookmark,
@@ -16,7 +15,6 @@ class ReaderBookmarksSheet extends StatefulWidget {
 
   final List<Bookmark> bookmarks;
   final List<ChapterMeta> chapters;
-  final bool isDemoPreview;
   final Future<void> Function(String note) onAddBookmark;
   final Future<void> Function(Bookmark bookmark) onSelectBookmark;
   final Future<void> Function(String bookmarkId) onDeleteBookmark;
@@ -65,42 +63,31 @@ class _ReaderBookmarksSheetState extends State<ReaderBookmarksSheet> {
                   ),
                 ],
               ),
-              if (!widget.isDemoPreview) ...[
-                const SizedBox(height: 8),
-                Row(
-                  children: [
-                    Expanded(
-                      child: TextField(
-                        controller: _noteController,
-                        decoration: const InputDecoration(
-                          hintText: '可选备注...',
-                          isDense: true,
-                          border: OutlineInputBorder(),
-                        ),
+              const SizedBox(height: 8),
+              Row(
+                children: [
+                  Expanded(
+                    child: TextField(
+                      controller: _noteController,
+                      decoration: const InputDecoration(
+                        hintText: '可选备注...',
+                        isDense: true,
+                        border: OutlineInputBorder(),
                       ),
                     ),
-                    const SizedBox(width: 8),
-                    FilledButton.icon(
-                      onPressed: () async {
-                        final note = _noteController.text;
-                        _noteController.clear();
-                        await widget.onAddBookmark(note);
-                      },
-                      icon: const Icon(Icons.bookmark_add_outlined, size: 18),
-                      label: const Text('添加书签'),
-                    ),
-                  ],
-                ),
-              ] else
-                Padding(
-                  padding: const EdgeInsets.symmetric(vertical: 8),
-                  child: Text(
-                    '预览模式下暂不写入持久化书签，导入本地 TXT 后即可完整保存书签。',
-                    style: theme.textTheme.bodySmall?.copyWith(
-                      color: theme.colorScheme.onSurfaceVariant,
-                    ),
                   ),
-                ),
+                  const SizedBox(width: 8),
+                  FilledButton.icon(
+                    onPressed: () async {
+                      final note = _noteController.text;
+                      _noteController.clear();
+                      await widget.onAddBookmark(note);
+                    },
+                    icon: const Icon(Icons.bookmark_add_outlined, size: 18),
+                    label: const Text('添加书签'),
+                  ),
+                ],
+              ),
               const SizedBox(height: 12),
               const Divider(height: 1),
               Expanded(

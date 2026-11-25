@@ -268,7 +268,6 @@ class _BookshelfPageState extends ConsumerState<BookshelfPage> {
       return _BookshelfEmptyView(
         onImportBooks:
             state.isImporting ? null : controller.importLocalBookFiles,
-        onPreviewReader: () => _openReader(context, 'demo'),
       );
     }
 
@@ -914,11 +913,9 @@ class _StatusBanner extends StatelessWidget {
 
 class _BookshelfEmptyView extends StatelessWidget {
   final VoidCallback? onImportBooks;
-  final VoidCallback onPreviewReader;
 
   const _BookshelfEmptyView({
     required this.onImportBooks,
-    required this.onPreviewReader,
   });
 
   @override
@@ -952,14 +949,6 @@ class _BookshelfEmptyView extends StatelessWidget {
                   fontWeight: FontWeight.w600,
                 ),
               ),
-              const SizedBox(height: 8),
-              Text(
-                'PureRead 净读支持导入本地 TXT（UTF-8 / GB18030 / UTF-16）与 EPUB 2/3 电子书，支持封面识别、精准 charOffset 锚点与考究中文排版。',
-                style: theme.textTheme.bodyMedium?.copyWith(
-                  color: theme.colorScheme.onSurfaceVariant,
-                ),
-                textAlign: TextAlign.center,
-              ),
               const SizedBox(height: 24),
               Wrap(
                 spacing: 12,
@@ -975,11 +964,6 @@ class _BookshelfEmptyView extends StatelessWidget {
                     onPressed: onImportBooks,
                     icon: const Icon(Icons.book_outlined),
                     label: const Text('导入 EPUB'),
-                  ),
-                  OutlinedButton.icon(
-                    onPressed: onPreviewReader,
-                    icon: const Icon(Icons.chrome_reader_mode_outlined),
-                    label: const Text('预览阅读器占位页'),
                   ),
                 ],
               ),

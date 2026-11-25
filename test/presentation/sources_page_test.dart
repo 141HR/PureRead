@@ -370,4 +370,69 @@ void main() {
     await tester.pumpAndSettle();
     expect(find.text('实时净化预览 (ContentSanitizer)'), findsOneWidget);
   });
+
+  testWidgets(
+    'SourcesPage shows split group chips sorted by count and opens searchable all-groups dialog',
+    (tester) async {
+      tester.view.devicePixelRatio = 1.0;
+      tester.view.physicalSize = const Size(1280, 720);
+      addTearDown(tester.view.reset);
+
+      final sourceRepo = _SourcesPageSourceRepo();
+      final groups = <String>[
+        '-------,0206⭐,高频分组',
+        '高频分组,精选',
+        '高频分组,轻小说',
+        '玄幻',
+        '都市',
+        '悬疑',
+        '历史',
+      ];
+      for (var i = 0; i < groups.length; i++) {
+        await sourceRepo.saveSource(
+          BookSource(
+            id: 'src_$i',
+            name: '书源$i',
+            groupName: groups[i],
+            engineType: SourceEngineType.legado,
+            baseUrl: 'https://s$i.example.com',
+            rawDefinition: '{}',
+            createdAt: now,
+            updatedAt: now,
+          ),
+        );
+      }
+
+      await tester.pumpWidget(
+        ProviderScope(
+          overrides: [
+            sourceRepositoryProvider.overrideWithValue(sourceRepo),
+            bookRepositoryProvider.overrideWithValue(_SourcesPageBookRepo()),
+          ],
+          child: const MaterialApp(home: SourcesPage()),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      // Divider-only token filtered; frequency-first chip shown; >6 groups button shown.
+      expect(find.textContaining('-------'), findsNothing);
+      expect(find.text('高频分组 (3)'), findsOneWidget);
+      expect(find.textContaining('全部分组'), findsOneWidget);
+
+      await tester.tap(find.textContaining('全部分组'));
+      await tester.pumpAndSettle();
+      expect(find.text('选择书源分组'), findsOneWidget);
+
+      await tester.enterText(
+        find.widgetWithText(TextField, '筛选分组名称...'),
+        '轻小说',
+      );
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('轻小说 (1)').last);
+      await tester.pumpAndSettle();
+
+      expect(find.text('书源2'), findsOneWidget);
+      expect(find.text('书源3'), findsNothing);
+    },
+  );
 }

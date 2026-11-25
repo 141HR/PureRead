@@ -5,7 +5,6 @@ class ReaderSessionState {
   final String bookId;
   final bool isLoading;
   final bool isPaginating;
-  final bool isDemoPreview;
   final String? errorMessage;
   final Book? book;
   final List<ChapterMeta> chapters;
@@ -31,7 +30,6 @@ class ReaderSessionState {
     required this.bookId,
     this.isLoading = true,
     this.isPaginating = false,
-    this.isDemoPreview = false,
     this.errorMessage,
     this.book,
     this.chapters = const <ChapterMeta>[],
@@ -102,7 +100,6 @@ class ReaderSessionState {
   ReaderSessionState copyWith({
     bool? isLoading,
     bool? isPaginating,
-    bool? isDemoPreview,
     String? errorMessage,
     bool clearError = false,
     Book? book,
@@ -129,7 +126,6 @@ class ReaderSessionState {
       bookId: bookId,
       isLoading: isLoading ?? this.isLoading,
       isPaginating: isPaginating ?? this.isPaginating,
-      isDemoPreview: isDemoPreview ?? this.isDemoPreview,
       errorMessage: clearError ? null : (errorMessage ?? this.errorMessage),
       book: book ?? this.book,
       chapters: chapters ?? this.chapters,

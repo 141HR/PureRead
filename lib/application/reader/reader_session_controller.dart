@@ -11,7 +11,6 @@ import '../core_providers.dart';
 import '../m2_providers.dart';
 import '../search/change_source_state.dart';
 import 'chapter_preload_scheduler.dart';
-import 'demo_book_content.dart';
 import 'local_epub_reader_provider.dart';
 import 'reader_session_state.dart';
 import 'reader_theme_x.dart';
@@ -194,7 +193,7 @@ class ReaderSessionController extends Notifier<ReaderSessionState> {
       // Read cached plain-Dart snapshot rather than Riverpod `state`/`ref`
       // inside `onDispose` to comply with Riverpod 3 lifecycle assertions.
       final snap = _snapshot;
-      if (!snap.isDemoPreview && snap.book != null) {
+      if (snap.book != null) {
         if (_isOnlineBook(snap.book!)) {
           _preloadScheduler?.cancelBookTasks(snap.book!.id);
         }
@@ -315,33 +314,6 @@ class ReaderSessionController extends Notifier<ReaderSessionState> {
       final loadedBook = await bookRepo.getBookById(bookId);
       if (!_isAlive) return;
 
-      if (loadedBook == null && bookId == 'demo') {
-        final demoBook = DemoBookContent.buildDemoBook();
-        final demoChapters = DemoBookContent.chapters;
-        _commit(
-          state.copyWith(
-            isLoading: false,
-            isDemoPreview: true,
-            book: demoBook,
-            chapters: demoChapters,
-            currentChapterIndex: 0,
-            anchorOffset: 0,
-            availableThemes: themes,
-            activeTheme: activeTheme,
-            keepScreenOn: keepScreenOn,
-            volumeKeyPaging: volumeKeyPaging,
-            safeAreaEnabled: safeAreaEnabled,
-          ),
-        );
-        await _loadChapterAndPaginate(
-          chapterIndex: 0,
-          targetCharOffset: 0,
-          landAtEnd: false,
-          preserveAnchor: true,
-        );
-        return;
-      }
-
       if (loadedBook == null) {
         _commit(
           state.copyWith(
@@ -403,7 +375,6 @@ class ReaderSessionController extends Notifier<ReaderSessionState> {
       _commit(
         state.copyWith(
           isLoading: false,
-          isDemoPreview: false,
           book: effectiveBook,
           chapters: chapters,
           currentChapterIndex: initialChapter,
@@ -507,7 +478,7 @@ class ReaderSessionController extends Notifier<ReaderSessionState> {
 
   Future<void> _repaginateCurrentChapterPreservingAnchor() async {
     if (!_isAlive || _viewportSize == null) return;
-    if (state.chapters.isEmpty && !state.isDemoPreview) return;
+    if (state.chapters.isEmpty) return;
     // If initial chapter load is already in flight and has not resolved text yet,
     // let `_loadChapterAndPaginate` pick up the updated `_viewportSize` on completion
     // rather than triggering a duplicate concurrent isolate read.
@@ -685,7 +656,7 @@ class ReaderSessionController extends Notifier<ReaderSessionState> {
   }
 
   void _scheduleOnlineAheadIfNeeded(int chapterIndex) {
-    if (!_isAlive || state.isDemoPreview) return;
+    if (!_isAlive) return;
     final book = state.book;
     final chapters = state.chapters;
     if (book == null || !_isOnlineBook(book) || chapters.isEmpty) return;
@@ -708,60 +679,53 @@ class ReaderSessionController extends Notifier<ReaderSessionState> {
 
     final sourceEpoch = _sourceEpoch;
     final sanitizer = ref.read(contentSanitizerProvider);
-    final isDemo = state.isDemoPreview;
     final book = state.book;
     final chapters = state.chapters;
 
-    final String rawText;
-    final String chapterTitle;
-    if (isDemo) {
-      rawText = DemoBookContent.chapterText(chapterIndex);
-      chapterTitle = DemoBookContent.chapters[chapterIndex].title;
-    } else {
-      if (book == null ||
-          chapterIndex < 0 ||
-          chapterIndex >= chapters.length) {
-        return '';
-      }
-      final chapter = chapters[chapterIndex];
-      chapterTitle = chapter.title;
-      switch (book.providerType) {
-        case ProviderType.localTxt:
-          final localTxtReader = ref.read(localTxtChapterReaderProvider);
-          rawText = await localTxtReader(book, chapter);
-        case ProviderType.localEpub:
-          final localEpubReader = ref.read(localEpubChapterReaderProvider);
-          rawText = await localEpubReader(
-            book,
-            chapter,
-            chapters: chapters,
-          );
-        case ProviderType.jsPlugin:
-        case ProviderType.legado:
-          final scheduler = _ensurePreloadScheduler();
-          rawText = await scheduler.fetchActiveChapter(
-            book: book,
-            chapter: chapter,
-          );
-          if (!_isAlive || sourceEpoch != _sourceEpoch) return '';
-          if (schedulePreload) {
-            unawaited(
-              scheduler.scheduleAhead(
-                book: book,
-                chapters: chapters,
-                currentChapterIndex: chapterIndex,
-              ),
-            );
-          }
-      }
-      if (!_isAlive || sourceEpoch != _sourceEpoch) return '';
+    if (book == null ||
+        chapterIndex < 0 ||
+        chapterIndex >= chapters.length) {
+      return '';
     }
+    final chapter = chapters[chapterIndex];
+    final chapterTitle = chapter.title;
+    final String rawText;
+    switch (book.providerType) {
+      case ProviderType.localTxt:
+        final localTxtReader = ref.read(localTxtChapterReaderProvider);
+        rawText = await localTxtReader(book, chapter);
+      case ProviderType.localEpub:
+        final localEpubReader = ref.read(localEpubChapterReaderProvider);
+        rawText = await localEpubReader(
+          book,
+          chapter,
+          chapters: chapters,
+        );
+      case ProviderType.jsPlugin:
+      case ProviderType.legado:
+        final scheduler = _ensurePreloadScheduler();
+        rawText = await scheduler.fetchActiveChapter(
+          book: book,
+          chapter: chapter,
+        );
+        if (!_isAlive || sourceEpoch != _sourceEpoch) return '';
+        if (schedulePreload) {
+          unawaited(
+            scheduler.scheduleAhead(
+              book: book,
+              chapters: chapters,
+              currentChapterIndex: chapterIndex,
+            ),
+          );
+        }
+    }
+    if (!_isAlive || sourceEpoch != _sourceEpoch) return '';
 
     final sanitized = await sanitizer.sanitize(
       rawText,
       SanitizeContext(
         bookId: bookId,
-        sourceId: book?.sourceId,
+        sourceId: book.sourceId,
         chapterTitle: chapterTitle,
       ),
     );
@@ -1013,7 +977,7 @@ class ReaderSessionController extends Notifier<ReaderSessionState> {
 
   /// Adds a bookmark at the current reading anchor.
   Future<void> addBookmark({String note = ''}) async {
-    if (!_isAlive || state.isDemoPreview || state.book == null) return;
+    if (!_isAlive || state.book == null) return;
     final bookRepo = ref.read(bookRepositoryProvider);
     final excerpt = _extractExcerpt(state.currentChapterText, state.anchorOffset);
     final now = DateTime.now();
@@ -1040,7 +1004,7 @@ class ReaderSessionController extends Notifier<ReaderSessionState> {
 
   /// Deletes bookmark [bookmarkId].
   Future<void> deleteBookmark(String bookmarkId) async {
-    if (!_isAlive || state.isDemoPreview) return;
+    if (!_isAlive) return;
     final bookRepo = ref.read(bookRepositoryProvider);
     try {
       await bookRepo.deleteBookmark(bookmarkId);
@@ -1252,7 +1216,7 @@ class ReaderSessionController extends Notifier<ReaderSessionState> {
   /// clears cached text/pages, jumps to [ChangeSourceSwitchResult.targetChapterIndex]
   /// at offset `0`, and persists updated progress.
   Future<void> applyChangeSourceResult(ChangeSourceSwitchResult result) async {
-    if (!_isAlive || state.isDemoPreview) return;
+    if (!_isAlive) return;
     _saveDebounceTimer?.cancel();
     _saveDebounceTimer = null;
     _batchCacheCancelToken?.cancel();
@@ -1306,7 +1270,7 @@ class ReaderSessionController extends Notifier<ReaderSessionState> {
     int count, {
     void Function(PreloadBatchProgress progress)? onProgress,
   }) async {
-    if (!_isAlive || state.isDemoPreview || state.book == null) {
+    if (!_isAlive || state.book == null) {
       return null;
     }
     final book = state.book!;
@@ -1341,7 +1305,7 @@ class ReaderSessionController extends Notifier<ReaderSessionState> {
   Future<void> flushProgress() async {
     _saveDebounceTimer?.cancel();
     _saveDebounceTimer = null;
-    if (!_isAlive || state.isDemoPreview || state.book == null) return;
+    if (!_isAlive || state.book == null) return;
     final bookRepo = ref.read(bookRepositoryProvider);
     await _persistProgressSnapshot(
       bookRepo: bookRepo,
@@ -1354,7 +1318,7 @@ class ReaderSessionController extends Notifier<ReaderSessionState> {
   }
 
   void _scheduleProgressSave() {
-    if (!_isAlive || state.isDemoPreview || state.book == null) return;
+    if (!_isAlive || state.book == null) return;
     _saveDebounceTimer?.cancel();
     _saveDebounceTimer = Timer(const Duration(milliseconds: 350), () {
       if (_isAlive) {

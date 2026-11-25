@@ -1,5 +1,6 @@
 import 'dart:async';
 
+import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -159,23 +160,9 @@ class _SourcesManageTabState extends ConsumerState<_SourcesManageTab> {
             statusMessage: state.statusMessage,
             onDismiss: controller.clearBanner,
           ),
-        SizedBox(
-          height: 44,
-          child: ListView.separated(
-            scrollDirection: Axis.horizontal,
-            padding: const EdgeInsets.symmetric(horizontal: 16),
-            itemCount: state.groups.length,
-            separatorBuilder: (_, _) => const SizedBox(width: 8),
-            itemBuilder: (context, index) {
-              final group = state.groups[index];
-              final count = state.countForGroup(group);
-              return ChoiceChip(
-                label: Text('$group ($count)'),
-                selected: state.selectedGroup == group,
-                onSelected: (_) => controller.selectGroup(group),
-              );
-            },
-          ),
+        _SourceGroupFilterBar(
+          state: state,
+          onSelectGroup: controller.selectGroup,
         ),
         if (state.selectedIds.isNotEmpty)
           Material(
@@ -343,9 +330,9 @@ class _SourcesManageTabState extends ConsumerState<_SourcesManageTab> {
                                     : 'Legado',
                                 color: theme.colorScheme.secondaryContainer,
                               ),
-                              _TagChip(
-                                label: source.groupName,
-                                color: theme.colorScheme.surfaceContainerHighest,
+                              ..._buildGroupTagChips(
+                                source.groupName,
+                                theme.colorScheme.surfaceContainerHighest,
                               ),
                               _CheckStatusChip(status: source.lastCheckStatus),
                             ],
@@ -1719,6 +1706,265 @@ class _RuleCard extends StatelessWidget {
   }
 }
 
+List<Widget> _buildGroupTagChips(String rawGroupName, Color color) {
+  final tags = SourcesState.parseGroupTags(rawGroupName);
+  return <Widget>[
+    for (final tag in tags.take(3)) _TagChip(label: tag, color: color),
+    if (tags.length > 3) _TagChip(label: '+${tags.length - 3}', color: color),
+  ];
+}
+
+class _SourceGroupFilterBar extends StatefulWidget {
+  final SourcesState state;
+  final void Function(String group) onSelectGroup;
+
+  const _SourceGroupFilterBar({
+    required this.state,
+    required this.onSelectGroup,
+  });
+
+  @override
+  State<_SourceGroupFilterBar> createState() => _SourceGroupFilterBarState();
+}
+
+class _SourceGroupFilterBarState extends State<_SourceGroupFilterBar> {
+  final ScrollController _scrollController = ScrollController();
+
+  @override
+  void dispose() {
+    _scrollController.dispose();
+    super.dispose();
+  }
+
+  void _handlePointerSignal(PointerSignalEvent event) {
+    if (event is PointerScrollEvent && _scrollController.hasClients) {
+      final delta = event.scrollDelta.dy != 0
+          ? event.scrollDelta.dy
+          : event.scrollDelta.dx;
+      final target = (_scrollController.offset + delta).clamp(
+        0.0,
+        _scrollController.position.maxScrollExtent,
+      );
+      _scrollController.jumpTo(target);
+    }
+  }
+
+  Future<void> _openAllGroupsDialog(BuildContext context) async {
+    await showDialog<void>(
+      context: context,
+      builder: (_) => _AllSourceGroupsDialog(
+        state: widget.state,
+        onSelectGroup: widget.onSelectGroup,
+      ),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final groups = widget.state.groups;
+    final selected = widget.state.selectedGroup;
+    final displayGroups = <String>[
+      if (groups.isNotEmpty) groups.first,
+      if (selected != '全部' && groups.contains(selected)) selected,
+      ...groups.skip(1).where((g) => g != selected),
+    ];
+    final showAllButton = groups.length > 6;
+
+    return Column(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        SizedBox(
+          height: 44,
+          child: Row(
+            children: [
+              Expanded(
+                child: Listener(
+                  onPointerSignal: _handlePointerSignal,
+                  child: ScrollConfiguration(
+                    behavior: ScrollConfiguration.of(context).copyWith(
+                      dragDevices: const <PointerDeviceKind>{
+                        PointerDeviceKind.touch,
+                        PointerDeviceKind.mouse,
+                        PointerDeviceKind.trackpad,
+                      },
+                    ),
+                    child: ListView.separated(
+                      controller: _scrollController,
+                      scrollDirection: Axis.horizontal,
+                      padding: EdgeInsets.fromLTRB(
+                        16,
+                        4,
+                        showAllButton ? 8 : 16,
+                        4,
+                      ),
+                      itemCount: displayGroups.length,
+                      separatorBuilder: (_, _) => const SizedBox(width: 6),
+                      itemBuilder: (context, index) {
+                        final group = displayGroups[index];
+                        final count = widget.state.countForGroup(group);
+                        return ChoiceChip(
+                          visualDensity: VisualDensity.compact,
+                          materialTapTargetSize:
+                              MaterialTapTargetSize.shrinkWrap,
+                          label: ConstrainedBox(
+                            constraints: const BoxConstraints(maxWidth: 168),
+                            child: Text(
+                              '$group ($count)',
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                            ),
+                          ),
+                          selected: selected == group,
+                          onSelected: (_) => widget.onSelectGroup(group),
+                        );
+                      },
+                    ),
+                  ),
+                ),
+              ),
+              if (showAllButton) ...[
+                const VerticalDivider(width: 1, indent: 8, endIndent: 8),
+                Padding(
+                  padding: const EdgeInsets.only(left: 4, right: 12),
+                  child: TextButton.icon(
+                    style: TextButton.styleFrom(
+                      visualDensity: VisualDensity.compact,
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: 10,
+                        vertical: 6,
+                      ),
+                    ),
+                    onPressed: () => unawaited(_openAllGroupsDialog(context)),
+                    icon: const Icon(Icons.grid_view_outlined, size: 16),
+                    label: Text('全部分组 (${groups.length - 1})'),
+                  ),
+                ),
+              ],
+            ],
+          ),
+        ),
+        const Divider(height: 1),
+      ],
+    );
+  }
+}
+
+class _AllSourceGroupsDialog extends StatefulWidget {
+  final SourcesState state;
+  final void Function(String group) onSelectGroup;
+
+  const _AllSourceGroupsDialog({
+    required this.state,
+    required this.onSelectGroup,
+  });
+
+  @override
+  State<_AllSourceGroupsDialog> createState() => _AllSourceGroupsDialogState();
+}
+
+class _AllSourceGroupsDialogState extends State<_AllSourceGroupsDialog> {
+  final TextEditingController _queryController = TextEditingController();
+
+  @override
+  void dispose() {
+    _queryController.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final query = _queryController.text.trim().toLowerCase();
+    final filteredGroups = widget.state.groups.where((g) {
+      if (query.isEmpty) return true;
+      return g.toLowerCase().contains(query);
+    }).toList();
+
+    return Dialog(
+      child: ConstrainedBox(
+        constraints: const BoxConstraints(maxWidth: 640, maxHeight: 520),
+        child: Padding(
+          padding: const EdgeInsets.all(16),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              Row(
+                children: [
+                  Text(
+                    '选择书源分组',
+                    style: theme.textTheme.titleMedium?.copyWith(
+                      fontWeight: FontWeight.w600,
+                    ),
+                  ),
+                  const Spacer(),
+                  IconButton(
+                    tooltip: '关闭',
+                    onPressed: () => Navigator.of(context).pop(),
+                    icon: const Icon(Icons.close),
+                  ),
+                ],
+              ),
+              const SizedBox(height: 8),
+              TextField(
+                controller: _queryController,
+                decoration: InputDecoration(
+                  isDense: true,
+                  hintText: '筛选分组名称...',
+                  prefixIcon: const Icon(Icons.search, size: 18),
+                  border: const OutlineInputBorder(),
+                  suffixIcon: _queryController.text.isNotEmpty
+                      ? IconButton(
+                          tooltip: '清空',
+                          onPressed: () {
+                            _queryController.clear();
+                            setState(() {});
+                          },
+                          icon: const Icon(Icons.close, size: 16),
+                        )
+                      : null,
+                ),
+                onChanged: (_) => setState(() {}),
+              ),
+              const SizedBox(height: 12),
+              Expanded(
+                child: filteredGroups.isEmpty
+                    ? Center(
+                        child: Text(
+                          '未找到匹配分组',
+                          style: theme.textTheme.bodyMedium?.copyWith(
+                            color: theme.colorScheme.onSurfaceVariant,
+                          ),
+                        ),
+                      )
+                    : SingleChildScrollView(
+                        child: Wrap(
+                          spacing: 8,
+                          runSpacing: 8,
+                          children: [
+                            for (final group in filteredGroups)
+                              ChoiceChip(
+                                visualDensity: VisualDensity.compact,
+                                label: Text(
+                                  '$group (${widget.state.countForGroup(group)})',
+                                ),
+                                selected: widget.state.selectedGroup == group,
+                                onSelected: (_) {
+                                  widget.onSelectGroup(group);
+                                  Navigator.of(context).pop();
+                                },
+                              ),
+                          ],
+                        ),
+                      ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
 class _TagChip extends StatelessWidget {
   final String label;
   final Color color;
@@ -1733,7 +1979,15 @@ class _TagChip extends StatelessWidget {
         color: color,
         borderRadius: BorderRadius.circular(6),
       ),
-      child: Text(label, style: Theme.of(context).textTheme.labelSmall),
+      child: ConstrainedBox(
+        constraints: const BoxConstraints(maxWidth: 168),
+        child: Text(
+          label,
+          maxLines: 1,
+          overflow: TextOverflow.ellipsis,
+          style: Theme.of(context).textTheme.labelSmall,
+        ),
+      ),
     );
   }
 }

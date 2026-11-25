@@ -27,24 +27,59 @@ class SourcesState {
     this.errorMessage,
   });
 
-  /// Sorted distinct group labels starting with `'全部'`.
-  List<String> get groups {
-    final set = <String>{};
-    for (final s in sources) {
-      final group = s.groupName.trim().isEmpty ? '默认' : s.groupName.trim();
-      set.add(group);
+  static final RegExp _groupSplitRe = RegExp(r'[,，;；]+');
+  static final RegExp _separatorOnlyRe = RegExp(r'^[-_=~*·•—–\s]+$');
+
+  /// Splits composite Legado `bookSourceGroup` strings (`"---,0206⭐,最终精简版"`)
+  /// into deduplicated human-readable tags, filtering pure decorative dividers.
+  static List<String> parseGroupTags(String rawGroupName) {
+    final seen = <String>{};
+    final tags = <String>[];
+    for (final rawToken in rawGroupName.split(_groupSplitRe)) {
+      final token = rawToken.trim();
+      if (token.isEmpty || _separatorOnlyRe.hasMatch(token)) {
+        continue;
+      }
+      if (seen.add(token)) {
+        tags.add(token);
+      }
     }
-    final sorted = set.toList()..sort();
+    if (tags.isEmpty) {
+      return const <String>['默认'];
+    }
+    return tags;
+  }
+
+  /// Counts of sources belonging to each parsed group tag.
+  Map<String, int> get groupCounts {
+    final counts = <String, int>{};
+    for (final s in sources) {
+      for (final tag in parseGroupTags(s.groupName)) {
+        counts[tag] = (counts[tag] ?? 0) + 1;
+      }
+    }
+    return counts;
+  }
+
+  /// Distinct group labels starting with `'全部'`, sorted by source count
+  /// descending (most populated groups first, `'默认'` last on ties).
+  List<String> get groups {
+    final counts = groupCounts;
+    final sorted = counts.keys.toList()
+      ..sort((a, b) {
+        final countCmp = (counts[b] ?? 0).compareTo(counts[a] ?? 0);
+        if (countCmp != 0) return countCmp;
+        if (a == '默认' && b != '默认') return 1;
+        if (b == '默认' && a != '默认') return -1;
+        return a.compareTo(b);
+      });
     return <String>['全部', ...sorted];
   }
 
   /// Count of sources belonging to [groupName] (`'全部'` returns total).
   int countForGroup(String groupName) {
     if (groupName == '全部') return sources.length;
-    return sources.where((s) {
-      final g = s.groupName.trim().isEmpty ? '默认' : s.groupName.trim();
-      return g == groupName;
-    }).length;
+    return groupCounts[groupName] ?? 0;
   }
 
   /// Filtered and weight-sorted visible book sources.
@@ -52,10 +87,9 @@ class SourcesState {
     final q = searchQuery.trim().toLowerCase();
     final filtered = sources.where((source) {
       if (selectedGroup != '全部') {
-        final g = source.groupName.trim().isEmpty
-            ? '默认'
-            : source.groupName.trim();
-        if (g != selectedGroup) return false;
+        if (!parseGroupTags(source.groupName).contains(selectedGroup)) {
+          return false;
+        }
       }
       switch (enabledFilter) {
         case SourceEnabledFilter.all:

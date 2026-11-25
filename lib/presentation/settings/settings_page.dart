@@ -652,7 +652,7 @@ class _AboutSectionCard extends StatelessWidget {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          const _InfoKeyValueRow(label: '应用版本', value: 'v1.0.0+1'),
+          const _InfoKeyValueRow(label: '应用版本', value: 'v0.3.0+3'),
           const SizedBox(height: 6),
           const _InfoKeyValueRow(
             label: '开源协议',

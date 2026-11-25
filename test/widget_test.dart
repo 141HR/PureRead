@@ -30,7 +30,7 @@ void main() {
   });
 
   testWidgets(
-    'Desktop viewport renders DesktopShell and two-column reader preview',
+    'Desktop viewport renders DesktopShell and switches navigation rails',
     (tester) async {
       tester.view.devicePixelRatio = 1.0;
       tester.view.physicalSize = const Size(1280, 720);
@@ -42,13 +42,17 @@ void main() {
       expect(find.byType(DesktopShell), findsOneWidget);
       expect(find.byType(MobileShell), findsNothing);
       expect(find.byType(NavigationRail), findsOneWidget);
+      expect(find.text('导入本地 TXT'), findsOneWidget);
+      expect(find.text('导入 EPUB'), findsOneWidget);
+      expect(find.text('预览阅读器占位页'), findsNothing);
 
-      await tester.tap(find.text('预览阅读器占位页'));
+      await tester.tap(find.text('搜索').last);
       await tester.pumpAndSettle();
+      expect(find.textContaining('多源聚合搜索'), findsOneWidget);
 
-      expect(find.text('阅读器 (demo)'), findsOneWidget);
-      expect(find.text('左栏逻辑页 P(2k)'), findsOneWidget);
-      expect(find.text('右栏逻辑页 P(2k+1)'), findsOneWidget);
+      await tester.tap(find.text('设置').last);
+      await tester.pumpAndSettle();
+      expect(find.textContaining('.pureread.zip'), findsOneWidget);
     },
   );
 }
