@@ -60,3 +60,9 @@ app.*.map.json
 
 # Widget Preview related
 .widget_preview/
+
+# Release packaging outputs and signing secrets
+/dist/
+/android/key.properties
+*.jks
+*.keystore
