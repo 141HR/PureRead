@@ -325,6 +325,7 @@ class LegadoRuleEvaluator {
                 page: page,
                 session: activeSession,
                 preserveKeyPage: true,
+                isJsCode: true,
                 cancelToken: cancelToken,
               );
             }
@@ -472,6 +473,7 @@ class LegadoRuleEvaluator {
                         keyword: keyword,
                         page: page,
                         session: activeSession,
+                        isJsCode: true,
                         cancelToken: cancelToken,
                       )
                     : code;
@@ -671,6 +673,7 @@ class LegadoRuleEvaluator {
                         input: input,
                         baseUrl: baseUrl,
                         session: activeSession,
+                        isJsCode: true,
                         cancelToken: cancelToken,
                       )
                     : code;
@@ -711,6 +714,7 @@ class LegadoRuleEvaluator {
                           input: current,
                           baseUrl: baseUrl,
                           session: activeSession,
+                          isJsCode: true,
                           cancelToken: cancelToken,
                         )
                       : code;
@@ -1155,13 +1159,14 @@ class LegadoRuleEvaluator {
     List<String>? regexGroups,
     bool expandCaptures = false,
     bool preserveKeyPage = false,
+    bool isJsCode = false,
     CancellationToken? cancelToken,
   }) async {
     String expandLiteral(String text) => expandCaptures && regexGroups != null
         ? LegadoSelectorEngine.expandCaptureGroups(text, regexGroups)
         : text;
 
-    final matches = _findMustacheExpressions(out);
+    final matches = _findMustacheExpressions(out, isJsCode: isJsCode);
     if (matches.isEmpty) {
       return expandLiteral(out);
     }
@@ -2717,59 +2722,211 @@ $jsLibPrefix$prepared
     int? page,
     required bool isJsCode,
   }) {
-    var out = code;
-    if (keyword != null) {
-      out = out.replaceAll('{{key}}', isJsCode ? keyword : keyword);
+    if ((keyword == null && page == null) ||
+        !code.contains('{{') ||
+        !code.contains('}}')) {
+      return code;
     }
-    if (page != null) {
-      out = out.replaceAll('{{page}}', page.toString());
+    final matches = _findMustacheExpressions(code, isJsCode: isJsCode);
+    if (matches.isEmpty) return code;
+
+    final buf = StringBuffer();
+    var cursor = 0;
+    for (final m in matches) {
+      buf.write(code.substring(cursor, m.start));
+      final expr = m.expr.trim();
+      if (expr == 'key' && keyword != null) {
+        buf.write(keyword);
+      } else if (expr == 'page' && page != null) {
+        buf.write(page.toString());
+      } else {
+        buf.write(code.substring(m.start, m.end));
+      }
+      cursor = m.end;
     }
-    return out;
+    buf.write(code.substring(cursor));
+    return buf.toString();
   }
 
   static List<({int start, int end, String expr})> _findMustacheExpressions(
-    String input,
-  ) {
+    String input, {
+    bool isJsCode = false,
+  }) {
+    if (!isJsCode) {
+      final results = <({int start, int end, String expr})>[];
+      var cursor = 0;
+      while (cursor < input.length) {
+        final open = input.indexOf('{{', cursor);
+        if (open == -1) break;
+        final close = _findMustacheClose(input, open + 2);
+        if (close == -1) break;
+        results.add((
+          start: open,
+          end: close + 2,
+          expr: input.substring(open + 2, close),
+        ));
+        cursor = close + 2;
+      }
+      return results;
+    }
+
     final results = <({int start, int end, String expr})>[];
-    var cursor = 0;
-    while (cursor < input.length) {
-      final open = input.indexOf('{{', cursor);
-      if (open == -1) break;
-      var depth = 0;
-      var inSingle = false;
-      var inDouble = false;
-      var close = -1;
-      for (var i = open + 2; i < input.length - 1; i++) {
-        final ch = input.codeUnitAt(i);
-        if (ch == 0x5C) {
-          i++;
+    var inSingle = false;
+    var inDouble = false;
+    var inTemplate = false;
+    final templateBraceStack = <int>[];
+
+    var i = 0;
+    while (i < input.length) {
+      final ch = input.codeUnitAt(i);
+
+      if (inSingle || inDouble || inTemplate) {
+        if (ch == 0x5C /* \ */) {
+          i += i + 1 < input.length ? 2 : 1;
           continue;
         }
-        if (ch == 0x27 && !inDouble) {
-          inSingle = !inSingle;
-        } else if (ch == 0x22 && !inSingle) {
-          inDouble = !inDouble;
-        } else if (!inSingle && !inDouble) {
-          if (ch == 0x7B) {
-            depth++;
-          } else if (ch == 0x7D) {
-            if (depth == 0 && input.codeUnitAt(i + 1) == 0x7D) {
-              close = i;
-              break;
-            }
-            if (depth > 0) depth--;
+        if (ch == 0x7B /* { */ &&
+            i + 1 < input.length &&
+            input.codeUnitAt(i + 1) == 0x7B) {
+          final close = _findMustacheClose(input, i + 2);
+          if (close != -1) {
+            results.add((
+              start: i,
+              end: close + 2,
+              expr: input.substring(i + 2, close),
+            ));
+            i = close + 2;
+            continue;
+          }
+          i += 2;
+          continue;
+        }
+        if (inTemplate &&
+            ch == 0x24 /* $ */ &&
+            i + 1 < input.length &&
+            input.codeUnitAt(i + 1) == 0x7B /* { */) {
+          templateBraceStack.add(1);
+          inTemplate = false;
+          i += 2;
+          continue;
+        }
+        if (inSingle && ch == 0x27 /* ' */) {
+          inSingle = false;
+        } else if (inDouble && ch == 0x22 /* " */) {
+          inDouble = false;
+        } else if (inTemplate && ch == 0x60 /* ` */) {
+          inTemplate = false;
+        }
+        i++;
+        continue;
+      }
+
+      if (ch == 0x2F /* / */ && i + 1 < input.length) {
+        final next = input.codeUnitAt(i + 1);
+        if (next == 0x2F /* / */) {
+          var end = i + 2;
+          while (end < input.length &&
+              input.codeUnitAt(end) != 0x0A &&
+              input.codeUnitAt(end) != 0x0D) {
+            end++;
+          }
+          i = end;
+          continue;
+        }
+        if (next == 0x2A /* * */) {
+          final end = input.indexOf('*/', i + 2);
+          if (end == -1) break;
+          i = end + 2;
+          continue;
+        }
+        final regexEnd = _findJsRegexLiteralEnd(input, i, input.length);
+        if (regexEnd != -1) {
+          i = regexEnd;
+          continue;
+        }
+      }
+
+      if (ch == 0x27 /* ' */) {
+        inSingle = true;
+        i++;
+        continue;
+      }
+      if (ch == 0x22 /* " */) {
+        inDouble = true;
+        i++;
+        continue;
+      }
+      if (ch == 0x60 /* ` */) {
+        inTemplate = true;
+        i++;
+        continue;
+      }
+
+      if (ch == 0x7B /* { */ &&
+          i + 1 < input.length &&
+          input.codeUnitAt(i + 1) == 0x7B) {
+        final close = _findMustacheClose(input, i + 2);
+        if (close != -1) {
+          results.add((
+            start: i,
+            end: close + 2,
+            expr: input.substring(i + 2, close),
+          ));
+          i = close + 2;
+          continue;
+        }
+        i += 2;
+        continue;
+      }
+
+      if (templateBraceStack.isNotEmpty) {
+        if (ch == 0x7B /* { */) {
+          templateBraceStack[templateBraceStack.length - 1]++;
+        } else if (ch == 0x7D /* } */) {
+          final remaining = templateBraceStack.last - 1;
+          if (remaining == 0) {
+            templateBraceStack.removeLast();
+            inTemplate = true;
+          } else {
+            templateBraceStack[templateBraceStack.length - 1] = remaining;
           }
         }
       }
-      if (close == -1) break;
-      results.add((
-        start: open,
-        end: close + 2,
-        expr: input.substring(open + 2, close),
-      ));
-      cursor = close + 2;
+
+      i++;
     }
     return results;
+  }
+
+  static int _findMustacheClose(String input, int contentStart) {
+    var depth = 0;
+    var inSingle = false;
+    var inDouble = false;
+    var inTemplate = false;
+    for (var i = contentStart; i < input.length - 1; i++) {
+      final ch = input.codeUnitAt(i);
+      if (ch == 0x5C /* \ */) {
+        i++;
+        continue;
+      }
+      if (ch == 0x27 && !inDouble && !inTemplate) {
+        inSingle = !inSingle;
+      } else if (ch == 0x22 && !inSingle && !inTemplate) {
+        inDouble = !inDouble;
+      } else if (ch == 0x60 && !inSingle && !inDouble) {
+        inTemplate = !inTemplate;
+      } else if (!inSingle && !inDouble && !inTemplate) {
+        if (ch == 0x7B) {
+          depth++;
+        } else if (ch == 0x7D) {
+          if (depth == 0 && input.codeUnitAt(i + 1) == 0x7D) {
+            return i;
+          }
+          if (depth > 0) depth--;
+        }
+      }
+    }
+    return -1;
   }
 
   static Map<String, String> _parsePutPairs(String body) {

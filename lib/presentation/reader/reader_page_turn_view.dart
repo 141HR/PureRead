@@ -63,6 +63,7 @@ class _ReaderPageTurnViewState extends State<ReaderPageTurnView>
   bool _isDragging = false;
   int _dragDirection = 0; // -1: next, 1: prev, 0: none
   bool _pendingTurnHandled = false;
+  int _gestureEpoch = 0;
 
   PageSlice? _outgoingLeft;
   PageSlice? _outgoingRight;
@@ -84,20 +85,24 @@ class _ReaderPageTurnViewState extends State<ReaderPageTurnView>
   void didUpdateWidget(covariant ReaderPageTurnView oldWidget) {
     super.didUpdateWidget(oldWidget);
 
+    final modeChanged = oldWidget.mode != widget.mode;
+    if (modeChanged) {
+      _gestureEpoch++;
+      _animController.stop();
+      _outgoingLeft = null;
+      _outgoingRight = null;
+      _externalAnimDirection = 0;
+      _dragDirection = 0;
+      _dragOffset = 0.0;
+      _isDragging = false;
+      _pendingTurnHandled = false;
+    }
+
     final pageChanged =
         oldWidget.currentPageIndex != widget.currentPageIndex ||
         oldWidget.currentChapterIndex != widget.currentChapterIndex;
 
     if (widget.mode == PageTurnMode.simulation) {
-      if (oldWidget.mode != PageTurnMode.simulation) {
-        _animController.stop();
-        _outgoingLeft = null;
-        _outgoingRight = null;
-        _externalAnimDirection = 0;
-        _dragDirection = 0;
-        _dragOffset = 0.0;
-        _isDragging = false;
-      }
       if (pageChanged) {
         _lastSimulationForward =
             widget.currentChapterIndex > oldWidget.currentChapterIndex ||
@@ -121,6 +126,7 @@ class _ReaderPageTurnViewState extends State<ReaderPageTurnView>
             widget.currentChapterIndex > oldWidget.currentChapterIndex ||
             (widget.currentChapterIndex == oldWidget.currentChapterIndex &&
                 widget.currentPageIndex > oldWidget.currentPageIndex);
+        _gestureEpoch++;
         _outgoingLeft = oldLeft;
         _outgoingRight = oldRight;
         _externalAnimDirection = isForward ? -1 : 1;
@@ -134,9 +140,13 @@ class _ReaderPageTurnViewState extends State<ReaderPageTurnView>
 
   @override
   void dispose() {
+    _gestureEpoch++;
     _animController.removeListener(_onAnimTick);
+    _animController.stop();
     _animController.dispose();
     _scrollController.dispose();
+    _outgoingLeft = null;
+    _outgoingRight = null;
     super.dispose();
   }
 
@@ -219,8 +229,11 @@ class _ReaderPageTurnViewState extends State<ReaderPageTurnView>
       child: LayoutBuilder(
         builder: (context, constraints) {
           final width = math.max(1.0, constraints.maxWidth);
-          return GestureDetector(
-            behavior: HitTestBehavior.opaque,
+          return buildEdgeGuardedPageTurnDetector(
+            context: context,
+            viewportWidth: width,
+            enableHorizontalDrag: _supportsHorizontalDrag,
+            dragStartBehavior: DragStartBehavior.start,
             onTapUp: (details) => _handleTapUp(details, width),
             onHorizontalDragStart: _supportsHorizontalDrag
                 ? (details) => _onDragStart(details, width)
@@ -515,6 +528,7 @@ class _ReaderPageTurnViewState extends State<ReaderPageTurnView>
   }
 
   void _onDragStart(DragStartDetails details, double width) {
+    _gestureEpoch++;
     _animController.stop();
     _externalAnimDirection = 0;
     _outgoingLeft = null;
@@ -556,10 +570,11 @@ class _ReaderPageTurnViewState extends State<ReaderPageTurnView>
         (dir < 0 && velocityX < -380) ||
         (dir > 0 && velocityX > 380);
 
+    final epoch = _gestureEpoch;
     _animStartOffset = _dragOffset;
     _animEndOffset = shouldComplete ? dir * width : 0.0;
     await _animController.forward(from: 0.0);
-    if (!mounted) return;
+    if (!mounted || epoch != _gestureEpoch) return;
 
     if (shouldComplete) {
       _pendingTurnHandled = true;
@@ -583,10 +598,18 @@ class _ReaderPageTurnViewState extends State<ReaderPageTurnView>
   void _cancelDrag() {
     if (!_isDragging) return;
     _isDragging = false;
+    if (_dragOffset == 0.0 || _dragDirection == 0) {
+      setState(() {
+        _dragOffset = 0.0;
+        _dragDirection = 0;
+      });
+      return;
+    }
+    final epoch = _gestureEpoch;
     _animStartOffset = _dragOffset;
     _animEndOffset = 0.0;
     _animController.forward(from: 0.0).whenComplete(() {
-      if (mounted) {
+      if (mounted && epoch == _gestureEpoch) {
         setState(() {
           _dragOffset = 0.0;
           _dragDirection = 0;

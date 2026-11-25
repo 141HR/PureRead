@@ -1,3 +1,5 @@
+import 'dart:io';
+
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
@@ -5,7 +7,6 @@ import 'package:go_router/go_router.dart';
 import '../../app/router.dart';
 import '../../application/bookshelf/bookshelf_controller.dart';
 import '../../application/bookshelf/bookshelf_state.dart';
-import '../../application/bookshelf/local_epub_providers.dart';
 import '../../domain/domain.dart';
 
 /// Adaptive PureRead bookshelf supporting list/grid toggle, sorting, F1.3
@@ -190,9 +191,7 @@ class _BookshelfPageState extends ConsumerState<BookshelfPage> {
     BookshelfState state,
     BookshelfController controller,
   ) {
-    final selectedBooks = state.books
-        .where((b) => state.selectedBookIds.contains(b.id))
-        .toList(growable: false);
+    final hasSelection = state.selectedBookIds.isNotEmpty;
     return AppBar(
       leading: IconButton(
         tooltip: '退出批量管理',
@@ -208,21 +207,26 @@ class _BookshelfPageState extends ConsumerState<BookshelfPage> {
         ),
         IconButton(
           tooltip: '批量移动分组',
-          onPressed: selectedBooks.isEmpty
+          onPressed: !hasSelection
               ? null
               : () => _showMoveBooksToGroupDialog(
                     context,
                     controller,
                     state.groups,
-                    selectedBooks.map((b) => b.id),
+                    state.selectedBookIds,
                   ),
           icon: const Icon(Icons.drive_file_move_outlined),
         ),
         IconButton(
           tooltip: '批量移除书籍',
-          onPressed: selectedBooks.isEmpty
+          onPressed: !hasSelection
               ? null
-              : () => _confirmDeleteBooks(context, selectedBooks, controller),
+              : () {
+                  final selectedBooks = state.books
+                      .where((b) => state.selectedBookIds.contains(b.id))
+                      .toList(growable: false);
+                  _confirmDeleteBooks(context, selectedBooks, controller);
+                },
           icon: const Icon(Icons.delete_outline),
         ),
       ],
@@ -298,6 +302,7 @@ class _BookshelfPageState extends ConsumerState<BookshelfPage> {
           final progress = state.progressByBookId[book.id];
           final isSelected = state.selectedBookIds.contains(book.id);
           return _BookGridCard(
+            key: ValueKey<String>(book.id),
             book: book,
             progress: progress,
             isSelectionMode: state.isSelectionMode,
@@ -330,6 +335,7 @@ class _BookshelfPageState extends ConsumerState<BookshelfPage> {
         final progress = state.progressByBookId[book.id];
         final isSelected = state.selectedBookIds.contains(book.id);
         return _BookListTile(
+          key: ValueKey<String>(book.id),
           book: book,
           progress: progress,
           isSelectionMode: state.isSelectionMode,
@@ -987,6 +993,7 @@ class _BookGridCard extends StatelessWidget {
   final VoidCallback onDelete;
 
   const _BookGridCard({
+    super.key,
     required this.book,
     required this.progress,
     required this.isSelectionMode,
@@ -1161,6 +1168,7 @@ class _BookListTile extends StatelessWidget {
   final VoidCallback onDelete;
 
   const _BookListTile({
+    super.key,
     required this.book,
     required this.progress,
     required this.isSelectionMode,
@@ -1307,27 +1315,69 @@ class _BookActionMenu extends StatelessWidget {
   }
 }
 
-class _BookCoverArt extends StatelessWidget {
+class _BookCoverArt extends StatefulWidget {
   final Book book;
   final bool compact;
 
   const _BookCoverArt({required this.book, this.compact = false});
 
   @override
+  State<_BookCoverArt> createState() => _BookCoverArtState();
+}
+
+class _BookCoverArtState extends State<_BookCoverArt> {
+  String? _resolvedCoverPath;
+  File? _coverFile;
+
+  @override
+  void initState() {
+    super.initState();
+    _syncCoverFile();
+  }
+
+  @override
+  void didUpdateWidget(covariant _BookCoverArt oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.book.coverPath != widget.book.coverPath) {
+      _syncCoverFile();
+    }
+  }
+
+  void _syncCoverFile() {
+    final trimmed = widget.book.coverPath?.trim();
+    if (trimmed == null || trimmed.isEmpty) {
+      _resolvedCoverPath = null;
+      _coverFile = null;
+      return;
+    }
+    if (trimmed == _resolvedCoverPath) {
+      return;
+    }
+    _resolvedCoverPath = trimmed;
+    final file = File(trimmed);
+    _coverFile = file.existsSync() ? file : null;
+  }
+
+  @override
   Widget build(BuildContext context) {
-    final coverProvider = resolveLocalCoverImageProvider(book.coverPath);
     final placeholder = _buildPlaceholder();
-    if (coverProvider == null) {
+    final coverFile = _coverFile;
+    if (coverFile == null) {
       return placeholder;
     }
-    return Image(
-      image: coverProvider,
+    final dpr = MediaQuery.devicePixelRatioOf(context).clamp(1.0, 3.0);
+    final decodeWidth = ((widget.compact ? 48.0 : 190.0) * dpr).round();
+    return Image.file(
+      coverFile,
       fit: BoxFit.cover,
+      cacheWidth: decodeWidth,
+      gaplessPlayback: true,
       errorBuilder: (_, _, _) => placeholder,
     );
   }
 
   Widget _buildPlaceholder() {
+    final book = widget.book;
     const palettes = <(Color, Color)>[
       (Color(0xFF4A6B53), Color(0xFF2D4433)),
       (Color(0xFF5D534A), Color(0xFF39322C)),
@@ -1357,8 +1407,8 @@ class _BookCoverArt extends StatelessWidget {
           colors: [topColor, bottomColor],
         ),
       ),
-      padding: EdgeInsets.all(compact ? 4 : 12),
-      child: compact
+      padding: EdgeInsets.all(widget.compact ? 4 : 12),
+      child: widget.compact
           ? Center(
               child: Text(
                 book.title.isEmpty ? '书' : book.title.substring(0, 1),

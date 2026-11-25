@@ -280,6 +280,182 @@ void main() {
       expect(currentPage, 0);
     });
 
+    testWidgets(
+      'ignores horizontal curl/slide drags in extreme Android system-back edge zones while preserving edge taps & parent swipes',
+      (tester) async {
+        tester.view.devicePixelRatio = 1.0;
+        tester.view.physicalSize = const Size(420, 760);
+        addTearDown(tester.view.reset);
+
+        final pages = _buildSamplePages(count: 4);
+
+        for (final mode in const <PageTurnMode>[
+          PageTurnMode.simulation,
+          PageTurnMode.slide,
+          PageTurnMode.cover,
+        ]) {
+          var currentPage = 1;
+          var parentHorizontalDrags = 0;
+
+          await tester.pumpWidget(
+            MediaQuery(
+              data: const MediaQueryData(
+                size: Size(420, 760),
+                systemGestureInsets: EdgeInsets.symmetric(horizontal: 28),
+              ),
+              child: MaterialApp(
+                home: Scaffold(
+                  body: GestureDetector(
+                    behavior: HitTestBehavior.translucent,
+                    onHorizontalDragStart: (_) => parentHorizontalDrags++,
+                    child: StatefulBuilder(
+                      builder: (context, setState) {
+                        return ReaderPageTurnView(
+                          mode: mode,
+                          columnCount: 1,
+                          config: const PaginationConfig(
+                            columnWidth: 380,
+                            columnHeight: 700,
+                            columnCount: 1,
+                          ),
+                          pages: pages,
+                          currentPageIndex: currentPage,
+                          currentChapterIndex: 0,
+                          canGoPrev: currentPage > 0,
+                          canGoNext: currentPage < pages.length - 1,
+                          backgroundColor: const Color(0xFFF7F4EC),
+                          textColor: const Color(0xFF2C2A26),
+                          secondaryTextColor: const Color(0xFF78736A),
+                          showOverlay: false,
+                          onNextPage: () async {
+                            if (currentPage < pages.length - 1) {
+                              setState(() => currentPage++);
+                            }
+                          },
+                          onPrevPage: () async {
+                            if (currentPage > 0) {
+                              setState(() => currentPage--);
+                            }
+                          },
+                          onToggleOverlay: () {},
+                          onScrollOffsetChanged: (_) {},
+                        );
+                      },
+                    ),
+                  ),
+                ),
+              ),
+            ),
+          );
+
+          // Drag starting in left system-back edge zone (dx = 12 < 28) is ignored
+          // by reader page turn and passed cleanly to parent/OS gesture.
+          final leftEdgeDrag = await tester.startGesture(const Offset(12, 380));
+          await leftEdgeDrag.moveBy(const Offset(180, 0));
+          await tester.pump();
+          expect(find.byType(ClipPath), findsNothing, reason: 'mode=$mode');
+          await leftEdgeDrag.up();
+          await tester.pumpAndSettle();
+          expect(currentPage, 1, reason: 'mode=$mode left edge drag');
+          expect(parentHorizontalDrags, greaterThan(0), reason: 'mode=$mode');
+
+          // Drag starting in right system-back edge zone (dx = 408 > 420 - 28).
+          final rightEdgeDrag = await tester.startGesture(
+            const Offset(408, 380),
+          );
+          await rightEdgeDrag.moveBy(const Offset(-180, 0));
+          await tester.pump();
+          expect(find.byType(ClipPath), findsNothing, reason: 'mode=$mode');
+          await rightEdgeDrag.up();
+          await tester.pumpAndSettle();
+          expect(currentPage, 1, reason: 'mode=$mode right edge drag');
+
+          // Taps inside the extreme edge zones still trigger prev/next turns.
+          await tester.tapAt(const Offset(10, 380));
+          await tester.pumpAndSettle();
+          expect(currentPage, 0, reason: 'mode=$mode left edge tap');
+
+          await tester.tapAt(const Offset(410, 380));
+          await tester.pumpAndSettle();
+          expect(currentPage, 1, reason: 'mode=$mode right edge tap');
+
+          // Normal interior drag still works smoothly.
+          await tester.dragFrom(const Offset(360, 380), const Offset(-180, 0));
+          await tester.pumpAndSettle();
+          expect(currentPage, 2, reason: 'mode=$mode interior drag');
+        }
+      },
+    );
+
+    testWidgets(
+      'disposes SimulationPageCurlView & ReaderPageTurnView cleanly mid-animation without errors',
+      (tester) async {
+        tester.view.devicePixelRatio = 1.0;
+        tester.view.physicalSize = const Size(420, 760);
+        addTearDown(tester.view.reset);
+
+        final pages = _buildSamplePages(count: 4);
+        var mode = PageTurnMode.simulation;
+        late void Function(VoidCallback) triggerSetState;
+
+        await tester.pumpWidget(
+          MaterialApp(
+            home: StatefulBuilder(
+              builder: (context, setState) {
+                triggerSetState = setState;
+                return Scaffold(
+                  body: ReaderPageTurnView(
+                    mode: mode,
+                    columnCount: 1,
+                    config: const PaginationConfig(
+                      columnWidth: 380,
+                      columnHeight: 700,
+                      columnCount: 1,
+                    ),
+                    pages: pages,
+                    currentPageIndex: 0,
+                    currentChapterIndex: 0,
+                    canGoPrev: false,
+                    canGoNext: true,
+                    backgroundColor: const Color(0xFFF7F4EC),
+                    textColor: const Color(0xFF2C2A26),
+                    secondaryTextColor: const Color(0xFF78736A),
+                    showOverlay: false,
+                    onNextPage: () async {},
+                    onPrevPage: () async {},
+                    onToggleOverlay: () {},
+                    onScrollOffsetChanged: (_) {},
+                  ),
+                );
+              },
+            ),
+          ),
+        );
+
+        // Start a curl drag and release into settle animation, then immediately
+        // switch mode mid-animation and finally unmount the widget tree.
+        final gesture = await tester.startGesture(const Offset(360, 400));
+        await gesture.moveBy(const Offset(-140, 0));
+        await tester.pump();
+        await gesture.up();
+        await tester.pump(const Duration(milliseconds: 20));
+
+        triggerSetState(() => mode = PageTurnMode.slide);
+        await tester.pump(const Duration(milliseconds: 20));
+
+        final slideGesture = await tester.startGesture(const Offset(360, 400));
+        await slideGesture.moveBy(const Offset(-120, 0));
+        await tester.pump();
+        await slideGesture.up();
+        await tester.pump(const Duration(milliseconds: 20));
+
+        // Unmount mid-animation.
+        await tester.pumpWidget(const SizedBox.shrink());
+        await tester.pumpAndSettle();
+        expect(tester.takeException(), isNull);
+      },
+    );
+
     testWidgets('animates programmatic didUpdateWidget page turns smoothly in 2-column mode', (
       tester,
     ) async {
