@@ -1027,6 +1027,92 @@ class ReaderSessionController extends Notifier<ReaderSessionState> {
     );
   }
 
+  /// Returns already-loaded sanitized text for [chapterIndex] when resident
+  /// in memory, or `null` without performing disk or network I/O.
+  String? getLoadedChapterText(int chapterIndex) {
+    if (chapterIndex == state.currentChapterIndex &&
+        state.currentChapterText.isNotEmpty) {
+      return state.currentChapterText;
+    }
+    return _chapterTextCache[chapterIndex];
+  }
+
+  /// Reads and sanitizes a single [chapterIndex] for in-book search without
+  /// mutating session pagination state, evicting the `{N-1, N, N+1}` reading
+  /// cache, or triggering ahead preloads / network fetches.
+  ///
+  /// For online books, returns `null` when [chapterIndex] is absent from both
+  /// session memory and [ChapterCacheGateway].
+  Future<String?> readChapterTextForSearch(int chapterIndex) async {
+    if (!_isAlive || state.book == null) return null;
+    if (chapterIndex < 0 || chapterIndex >= state.chapters.length) {
+      return null;
+    }
+    final cached = getLoadedChapterText(chapterIndex);
+    if (cached != null) return cached;
+
+    final book = state.book!;
+    final chapters = state.chapters;
+    final chapter = chapters[chapterIndex];
+    final sourceEpoch = _sourceEpoch;
+
+    final String? rawText;
+    switch (book.providerType) {
+      case ProviderType.localTxt:
+        rawText = await ref.read(localTxtChapterReaderProvider)(book, chapter);
+      case ProviderType.localEpub:
+        rawText = await ref.read(localEpubChapterReaderProvider)(
+          book,
+          chapter,
+          chapters: chapters,
+        );
+      case ProviderType.jsPlugin:
+      case ProviderType.legado:
+        rawText = await ref
+            .read(chapterCacheGatewayProvider)
+            .readChapterText(book.id, chapter.chapterIndex);
+    }
+
+    if (!_isAlive || sourceEpoch != _sourceEpoch || rawText == null) {
+      return null;
+    }
+
+    final sanitizer = ref.read(contentSanitizerProvider);
+    return sanitizer.sanitize(
+      rawText,
+      SanitizeContext(
+        bookId: bookId,
+        sourceId: book.sourceId,
+        chapterTitle: chapter.title,
+      ),
+    );
+  }
+
+  /// Jumps directly to a search match at [chapterIndex] and [charOffset],
+  /// pushing the current position onto [ReaderSessionState.jumpUndoStack],
+  /// loading/repaginating the target chapter centered on [charOffset], and
+  /// persisting updated reading progress.
+  Future<void> jumpToSearchAnchor(int chapterIndex, int charOffset) async {
+    if (!_isAlive || state.chapters.isEmpty) return;
+    final targetChapter = chapterIndex.clamp(0, state.chapters.length - 1);
+    final safeOffset = math.max(0, charOffset);
+    _pushJumpUndoAnchor();
+
+    if (targetChapter == state.currentChapterIndex &&
+        state.currentChapterText.isNotEmpty) {
+      _chapterTextCache[targetChapter] ??= state.currentChapterText;
+    }
+
+    await _loadChapterAndPaginate(
+      chapterIndex: targetChapter,
+      targetCharOffset: safeOffset,
+      landAtEnd: false,
+      preserveAnchor: false,
+    );
+    if (!_isAlive) return;
+    await flushProgress();
+  }
+
   /// Activates a saved/built-in theme by [themeId] and repaginates preserving
   /// `anchorOffset`.
   Future<void> selectTheme(String themeId) async {

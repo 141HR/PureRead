@@ -5,12 +5,15 @@ import 'package:flutter/scheduler.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import '../../application/reader/reader_search_controller.dart';
+import '../../application/reader/reader_search_state.dart';
 import '../../application/reader/reader_session_controller.dart';
 import '../../application/reader/reader_session_state.dart';
 import '../../domain/domain.dart';
 import '../search/change_source_sheet.dart';
 import 'reader_bookmarks_sheet.dart';
 import 'reader_page_turn_view.dart';
+import 'reader_search_sheet.dart';
 import 'reader_settings_sheet.dart';
 import 'reader_toc_drawer.dart';
 
@@ -36,6 +39,7 @@ class _ReaderPageState extends ConsumerState<ReaderPage>
 
   Size? _lastReportedCanvasSize;
   double? _pendingSeekRatio;
+  bool _isSearchSheetOpen = false;
 
   @override
   void initState() {
@@ -81,6 +85,10 @@ class _ReaderPageState extends ConsumerState<ReaderPage>
 
   @override
   Widget build(BuildContext context) {
+    ref.listen<ReaderSearchState>(
+      readerSearchControllerProvider(widget.bookId),
+      (_, _) {},
+    );
     final state = ref.watch(readerSessionControllerProvider(widget.bookId));
     final controller = ref.read(
       readerSessionControllerProvider(widget.bookId).notifier,
@@ -397,6 +405,13 @@ class _ReaderPageState extends ConsumerState<ReaderPage>
                 ),
               ],
               IconButton(
+                tooltip: '书内搜索 (Ctrl+F)',
+                onPressed: state.book == null
+                    ? null
+                    : () => _openSearchSheet(context, controller),
+                icon: const Icon(Icons.search),
+              ),
+              IconButton(
                 tooltip: '书签',
                 onPressed: () => _openBookmarksSheet(context, state, controller),
                 icon: const Icon(Icons.bookmark_border),
@@ -543,6 +558,12 @@ class _ReaderPageState extends ConsumerState<ReaderPage>
       unawaited(controller.triggerBossKeyHide());
       return KeyEventResult.handled;
     }
+    if (isCtrl && key == LogicalKeyboardKey.keyF) {
+      if (!state.isLoading && state.book != null) {
+        unawaited(_openSearchSheet(context, controller));
+      }
+      return KeyEventResult.handled;
+    }
     if (key == LogicalKeyboardKey.f11) {
       unawaited(controller.toggleImmersive());
       return KeyEventResult.handled;
@@ -628,6 +649,24 @@ class _ReaderPageState extends ConsumerState<ReaderPage>
     );
   }
 
+  Future<void> _openSearchSheet(
+    BuildContext context,
+    ReaderSessionController controller,
+  ) async {
+    if (_isSearchSheetOpen) return;
+    _isSearchSheetOpen = true;
+    controller.setOverlayVisible(false);
+    try {
+      await ReaderSearchSheet.show(
+        context,
+        bookId: widget.bookId,
+        onJumpToMatch: controller.jumpToSearchAnchor,
+      );
+    } finally {
+      _isSearchSheetOpen = false;
+    }
+  }
+
   void _openBookmarksSheet(
     BuildContext context,
     ReaderSessionState state,
@@ -679,6 +718,7 @@ class _ReaderPageState extends ConsumerState<ReaderPage>
     );
     if (!mounted || result == null) return;
     setState(() => _pendingSeekRatio = null);
+    ref.read(readerSearchControllerProvider(widget.bookId).notifier).clear();
     await controller.applyChangeSourceResult(result);
   }
 
