@@ -7,6 +7,7 @@ import android.os.Build
 import android.provider.OpenableColumns
 import android.view.KeyEvent
 import android.view.View
+import android.view.Window
 import android.view.WindowInsets
 import android.view.WindowInsetsController
 import android.view.WindowManager
@@ -31,7 +32,13 @@ class MainActivity : FlutterActivity() {
     private var pendingPickResult: MethodChannel.Result? = null
     private var pendingAllowedExtensions: Set<String> = emptySet()
     private var volumeKeyPagingEnabled: Boolean = false
+    private var restoreVolumeKeyPagingOnResume: Boolean = false
+    private var isActivityResumed: Boolean = false
     private var volumeKeySink: EventChannel.EventSink? = null
+    private var immersiveModeEnabled: Boolean = false
+    private var initialDisplayCutoutMode: Int? = null
+    private var preImmersiveSystemBarsBehavior: Int? = null
+    private var preImmersiveSystemUiVisibility: Int? = null
 
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)
@@ -54,9 +61,39 @@ class MainActivity : FlutterActivity() {
 
                 override fun onCancel(arguments: Any?) {
                     volumeKeySink = null
+                    volumeKeyPagingEnabled = false
+                    restoreVolumeKeyPagingOnResume = false
                 }
             },
         )
+    }
+
+    override fun onResume() {
+        super.onResume()
+        isActivityResumed = true
+        if (restoreVolumeKeyPagingOnResume && volumeKeySink != null) {
+            volumeKeyPagingEnabled = true
+        }
+        restoreVolumeKeyPagingOnResume = false
+        if (immersiveModeEnabled && hasWindowFocus()) {
+            applyImmersiveMode(true)
+        }
+    }
+
+    override fun onPause() {
+        isActivityResumed = false
+        if (volumeKeyPagingEnabled) {
+            restoreVolumeKeyPagingOnResume = true
+            volumeKeyPagingEnabled = false
+        }
+        super.onPause()
+    }
+
+    override fun onWindowFocusChanged(hasFocus: Boolean) {
+        super.onWindowFocusChanged(hasFocus)
+        if (hasFocus && immersiveModeEnabled && !isFinishing && !isDestroyed) {
+            applyImmersiveMode(true)
+        }
     }
 
     private fun handleMethodCall(call: MethodCall, result: MethodChannel.Result) {
@@ -75,31 +112,53 @@ class MainActivity : FlutterActivity() {
             "setKeepScreenOn" -> {
                 val enabled = call.argument<Boolean>("enabled") ?: false
                 runOnUiThread {
-                    if (enabled) {
-                        window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
-                    } else {
-                        window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+                    if (!isFinishing && !isDestroyed) {
+                        val currentWindow = window
+                        if (currentWindow != null) {
+                            if (enabled) {
+                                currentWindow.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+                            } else {
+                                currentWindow.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+                            }
+                        }
                     }
                     result.success(null)
                 }
             }
 
             "setVolumeKeyPaging" -> {
-                volumeKeyPagingEnabled = call.argument<Boolean>("enabled") ?: false
+                val enabled = call.argument<Boolean>("enabled") ?: false
+                if (enabled) {
+                    if (isActivityResumed) {
+                        volumeKeyPagingEnabled = true
+                        restoreVolumeKeyPagingOnResume = false
+                    } else {
+                        volumeKeyPagingEnabled = false
+                        restoreVolumeKeyPagingOnResume = true
+                    }
+                } else {
+                    volumeKeyPagingEnabled = false
+                    restoreVolumeKeyPagingOnResume = false
+                }
                 result.success(null)
             }
 
             "setImmersiveMode" -> {
                 val enabled = call.argument<Boolean>("enabled") ?: false
                 runOnUiThread {
-                    applyImmersiveMode(enabled)
+                    immersiveModeEnabled = enabled
+                    if (!isFinishing && !isDestroyed) {
+                        applyImmersiveMode(enabled)
+                    }
                     result.success(null)
                 }
             }
 
             "bossKeyHide" -> {
                 runOnUiThread {
-                    moveTaskToBack(true)
+                    if (!isFinishing && !isDestroyed) {
+                        moveTaskToBack(true)
+                    }
                     result.success(null)
                 }
             }
@@ -174,9 +233,17 @@ class MainActivity : FlutterActivity() {
         ioExecutor.execute {
             try {
                 val copiedPaths = copyUrisToImports(uris, allowedExtensions)
-                runOnUiThread { result.success(copiedPaths) }
+                runOnUiThread {
+                    if (!isDestroyed) {
+                        result.success(copiedPaths)
+                    }
+                }
             } catch (e: Exception) {
-                runOnUiThread { result.error("PICK_COPY_FAILED", e.message, null) }
+                runOnUiThread {
+                    if (!isDestroyed) {
+                        result.error("PICK_COPY_FAILED", e.message, null)
+                    }
+                }
             }
         }
     }
@@ -256,20 +323,58 @@ class MainActivity : FlutterActivity() {
         return leaf
     }
 
-    @Suppress("DEPRECATION")
     private fun applyImmersiveMode(enabled: Boolean) {
+        if (isFinishing || isDestroyed) return
+        val currentWindow = window ?: return
+        applyImmersiveModeToWindow(currentWindow, enabled)
+    }
+
+    @Suppress("DEPRECATION")
+    private fun applyImmersiveModeToWindow(currentWindow: Window, enabled: Boolean) {
+        val decorView = currentWindow.decorView
+
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+            val attrs = currentWindow.attributes
+            if (initialDisplayCutoutMode == null) {
+                initialDisplayCutoutMode = attrs.layoutInDisplayCutoutMode
+            }
+            val targetCutoutMode = if (enabled) {
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                    WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_ALWAYS
+                } else {
+                    WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES
+                }
+            } else {
+                initialDisplayCutoutMode
+                    ?: WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_DEFAULT
+            }
+            if (attrs.layoutInDisplayCutoutMode != targetCutoutMode) {
+                attrs.layoutInDisplayCutoutMode = targetCutoutMode
+                currentWindow.attributes = attrs
+            }
+        }
+
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
-            val controller = window.insetsController ?: return
+            val controller = currentWindow.insetsController ?: return
             if (enabled) {
+                if (preImmersiveSystemBarsBehavior == null) {
+                    preImmersiveSystemBarsBehavior = controller.systemBarsBehavior
+                }
                 controller.hide(WindowInsets.Type.statusBars() or WindowInsets.Type.navigationBars())
                 controller.systemBarsBehavior =
                     WindowInsetsController.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
             } else {
                 controller.show(WindowInsets.Type.statusBars() or WindowInsets.Type.navigationBars())
+                preImmersiveSystemBarsBehavior?.let { savedBehavior ->
+                    controller.systemBarsBehavior = savedBehavior
+                }
+                preImmersiveSystemBarsBehavior = null
             }
         } else {
-            val decorView = window.decorView
             if (enabled) {
+                if (preImmersiveSystemUiVisibility == null) {
+                    preImmersiveSystemUiVisibility = decorView.systemUiVisibility
+                }
                 decorView.systemUiVisibility = (
                     View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY
                         or View.SYSTEM_UI_FLAG_FULLSCREEN
@@ -279,13 +384,17 @@ class MainActivity : FlutterActivity() {
                         or View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION
                     )
             } else {
-                decorView.systemUiVisibility = View.SYSTEM_UI_FLAG_VISIBLE
+                decorView.systemUiVisibility =
+                    preImmersiveSystemUiVisibility ?: View.SYSTEM_UI_FLAG_VISIBLE
+                preImmersiveSystemUiVisibility = null
             }
         }
     }
 
     override fun dispatchKeyEvent(event: KeyEvent): Boolean {
-        if (volumeKeyPagingEnabled &&
+        if (isActivityResumed &&
+            volumeKeyPagingEnabled &&
+            volumeKeySink != null &&
             (event.keyCode == KeyEvent.KEYCODE_VOLUME_UP ||
                 event.keyCode == KeyEvent.KEYCODE_VOLUME_DOWN)
         ) {
@@ -299,8 +408,21 @@ class MainActivity : FlutterActivity() {
     }
 
     override fun onDestroy() {
-        pendingPickResult = null
+        isActivityResumed = false
+        volumeKeyPagingEnabled = false
+        restoreVolumeKeyPagingOnResume = false
         volumeKeySink = null
+        pendingPickResult = null
+        pendingAllowedExtensions = emptySet()
+        if (immersiveModeEnabled) {
+            immersiveModeEnabled = false
+            runCatching {
+                window?.let { applyImmersiveModeToWindow(it, false) }
+            }
+        }
+        runCatching {
+            window?.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+        }
         ioExecutor.shutdownNow()
         super.onDestroy()
     }

@@ -686,7 +686,10 @@ class LegadoCompatProvider implements BookProvider {
         if (title.isEmpty) continue;
         final resolvedUrl = rawUrl.isEmpty
             ? resp.finalUrl
-            : LegadoRuleEvaluator.resolveUrlSpec(rawUrl, resp.finalUrl);
+            : (_isBareNonHttpIdentifier(rawUrl) &&
+                      _startsWithJsRule(source.ruleContent.content))
+                  ? rawUrl.trim()
+                  : LegadoRuleEvaluator.resolveUrlSpec(rawUrl, resp.finalUrl);
         chapters.add(
           ChapterMeta(
             bookId: firstFinalUrl,
@@ -795,45 +798,68 @@ class LegadoCompatProvider implements BookProvider {
     var firstFinalUrl = rawChapterUrl;
     var detectedCharset = 'utf-8';
 
+    final contentRule = source.ruleContent.content;
+    final contentStartsWithJs = _startsWithJsRule(contentRule);
+
     while (pendingQueue.isNotEmpty && pageCount < maxContentPages) {
       cancelToken?.throwIfCancelled();
       final currentSpec = pendingQueue.removeAt(0);
-      final req = await evaluator.parseUrlSpecAsync(
-        currentSpec,
-        baseUrl: source.effectiveBaseUrl,
-        defaultHeaders: baseHeaders,
-        defaultCharset: source.charset,
-        session: session,
-        cancelToken: cancelToken,
-      );
-      _ensureSupported(stepWebView: req.webView, stepName: 'chapterUrl');
+      final isBareJsChapterId =
+          contentStartsWithJs && _isBareNonHttpIdentifier(currentSpec);
 
-      final key = _canonicalUrlKey(req.url);
-      if (visitedUrls.contains(key)) continue;
-      visitedUrls.add(key);
-      pageCount++;
+      final String pageInput;
+      final String evalBaseUrl;
+      if (isBareJsChapterId) {
+        final bareId = currentSpec.trim();
+        if (!visitedUrls.add(bareId)) continue;
+        pageCount++;
+        if (pageCount == 1) {
+          firstStatus = 200;
+          firstFinalUrl = bareId;
+          detectedCharset = 'direct-js';
+        }
+        pageInput = bareId;
+        evalBaseUrl = source.effectiveBaseUrl;
+      } else {
+        final req = await evaluator.parseUrlSpecAsync(
+          currentSpec,
+          baseUrl: source.effectiveBaseUrl,
+          defaultHeaders: baseHeaders,
+          defaultCharset: source.charset,
+          session: session,
+          cancelToken: cancelToken,
+        );
+        _ensureSupported(stepWebView: req.webView, stepName: 'chapterUrl');
 
-      final resp = await httpClient.request(
-        req.url,
-        method: req.method,
-        data: req.body,
-        headers: req.headers,
-        charsetOverride: req.charset,
-        rateLimitMs: effectiveRateLimitMs,
-        cancelToken: cancelToken,
-      );
+        final key = _canonicalUrlKey(req.url);
+        if (visitedUrls.contains(key)) continue;
+        visitedUrls.add(key);
+        pageCount++;
 
-      if (pageCount == 1) {
-        firstStatus = resp.statusCode;
-        firstFinalUrl = resp.finalUrl;
-        detectedCharset = resp.detectedCharset;
-        visitedUrls.add(_canonicalUrlKey(resp.finalUrl));
+        final resp = await httpClient.request(
+          req.url,
+          method: req.method,
+          data: req.body,
+          headers: req.headers,
+          charsetOverride: req.charset,
+          rateLimitMs: effectiveRateLimitMs,
+          cancelToken: cancelToken,
+        );
+
+        if (pageCount == 1) {
+          firstStatus = resp.statusCode;
+          firstFinalUrl = resp.finalUrl;
+          detectedCharset = resp.detectedCharset;
+          visitedUrls.add(_canonicalUrlKey(resp.finalUrl));
+        }
+        pageInput = resp.body;
+        evalBaseUrl = resp.finalUrl;
       }
 
       final pageText = await evaluator.evaluateString(
-        resp.body,
-        source.ruleContent.content,
-        baseUrl: resp.finalUrl,
+        pageInput,
+        contentRule,
+        baseUrl: evalBaseUrl,
         session: session,
         cancelToken: cancelToken,
       );
@@ -844,19 +870,19 @@ class LegadoCompatProvider implements BookProvider {
       final nextContentRule = source.ruleContent.nextContentUrl.trim();
       if (nextContentRule.isNotEmpty) {
         final nextRawUrls = await evaluator.evaluateList(
-          resp.body,
+          pageInput,
           nextContentRule,
-          baseUrl: resp.finalUrl,
+          baseUrl: evalBaseUrl,
           session: session,
           cancelToken: cancelToken,
         );
         for (final rawNext in nextRawUrls) {
           final trimmedNext = rawNext.trim();
           if (trimmedNext.isEmpty) continue;
-          final resolvedNext = LegadoRuleEvaluator.resolveUrlSpec(
-            trimmedNext,
-            resp.finalUrl,
-          );
+          final resolvedNext =
+              contentStartsWithJs && _isBareNonHttpIdentifier(trimmedNext)
+              ? trimmedNext
+              : LegadoRuleEvaluator.resolveUrlSpec(trimmedNext, evalBaseUrl);
           final nextKey = _canonicalUrlKey(resolvedNext);
           if (!visitedUrls.contains(nextKey) &&
               !pendingQueue.any((u) => _canonicalUrlKey(u) == nextKey)) {
@@ -879,10 +905,14 @@ class LegadoCompatProvider implements BookProvider {
       final spec = (resolvedReplace.startsWith('##') || isJsReplace)
           ? resolvedReplace
           : '##$resolvedReplace';
+      final replaceBaseUrl =
+          SourceHttpClient.tryNormalizeHttpUri(firstFinalUrl) != null
+          ? firstFinalUrl
+          : source.effectiveBaseUrl;
       text = await evaluator.evaluateString(
         text,
         spec,
-        baseUrl: firstFinalUrl,
+        baseUrl: replaceBaseUrl,
         session: session,
         cancelToken: cancelToken,
       );
@@ -1067,6 +1097,50 @@ class LegadoCompatProvider implements BookProvider {
   static String? _nullableTrimmed(String raw) {
     final trimmed = raw.trim();
     return trimmed.isEmpty ? null : trimmed;
+  }
+
+  static final RegExp _urlOptionsSuffixPattern = RegExp(r',\s*\{[\s\S]*\}$');
+  static final RegExp _relativeWebFileExtPattern = RegExp(
+    r'\.(?:s?html?|xhtml|php\d*|aspx?|jsp|jspx|do|action|json|xml|txt|cgi|py|rb|pl|cfm)$',
+    caseSensitive: false,
+  );
+
+  static bool _startsWithJsRule(String rule) {
+    final lower = rule.trimLeft().toLowerCase();
+    return lower.startsWith('@js:') || lower.startsWith('<js>');
+  }
+
+  static bool _isBareNonHttpIdentifier(String raw) {
+    final trimmed = raw.trim();
+    if (trimmed.isEmpty) return false;
+    final lower = trimmed.toLowerCase();
+    if (lower.startsWith('http://') ||
+        lower.startsWith('https://') ||
+        trimmed.contains('://') ||
+        trimmed.startsWith('//')) {
+      return false;
+    }
+    if (trimmed.contains('/') || trimmed.contains(r'\')) {
+      return false;
+    }
+    if (trimmed.contains('?') || trimmed.contains('#')) {
+      return false;
+    }
+    if (lower.startsWith('@js:') ||
+        lower.contains('<js>') ||
+        (trimmed.contains('{{') && trimmed.contains('}}'))) {
+      return false;
+    }
+    if (_urlOptionsSuffixPattern.hasMatch(trimmed)) {
+      return false;
+    }
+    if (_relativeWebFileExtPattern.hasMatch(trimmed)) {
+      return false;
+    }
+    if (SourceHttpClient.tryNormalizeHttpUri(trimmed) != null) {
+      return false;
+    }
+    return true;
   }
 
   static int? _parseWordCount(String raw) {

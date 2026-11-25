@@ -540,6 +540,128 @@ PageCurlGeometry computeCurl({
   );
 }
 
+/// Default minimum horizontal edge exclusion zone (in logical pixels) to avoid
+/// competing with Android's system edge-swipe back gesture and drawer drags.
+const double kReaderEdgeSwipeGuardMinWidth = 20.0;
+
+/// Upper bound on the horizontal edge exclusion zone so wide tablets or
+/// generous system gesture insets never block normal page-turn drags.
+const double kReaderEdgeSwipeGuardMaxWidth = 40.0;
+
+/// Computes left/right horizontal drag exclusion widths for [viewportWidth]
+/// based on active `MediaQuery.maybeSystemGestureInsetsOf(context)`.
+({double left, double right}) computeReaderEdgeSwipeGuard(
+  BuildContext context,
+  double viewportWidth,
+) {
+  if (!viewportWidth.isFinite || viewportWidth <= 0.0) {
+    return (left: 0.0, right: 0.0);
+  }
+  final insets =
+      MediaQuery.maybeSystemGestureInsetsOf(context) ?? EdgeInsets.zero;
+  final maxByViewport = viewportWidth * 0.12;
+  final left = math.min(
+    maxByViewport,
+    math.max(
+      kReaderEdgeSwipeGuardMinWidth,
+      insets.left.clamp(0.0, kReaderEdgeSwipeGuardMaxWidth),
+    ),
+  );
+  final right = math.min(
+    maxByViewport,
+    math.max(
+      kReaderEdgeSwipeGuardMinWidth,
+      insets.right.clamp(0.0, kReaderEdgeSwipeGuardMaxWidth),
+    ),
+  );
+  return (left: left, right: right);
+}
+
+/// Horizontal drag recognizer that declines pointers starting in the extreme
+/// left/right system-back edge zones so OS edge-back and drawer gestures work
+/// without conflicting with page-turn drags, while tap zones remain active.
+class EdgeGuardedHorizontalDragGestureRecognizer
+    extends HorizontalDragGestureRecognizer {
+  EdgeGuardedHorizontalDragGestureRecognizer({
+    super.debugOwner,
+    super.supportedDevices,
+    this.viewportWidth = 0.0,
+    this.leftEdgeGuard = kReaderEdgeSwipeGuardMinWidth,
+    this.rightEdgeGuard = kReaderEdgeSwipeGuardMinWidth,
+  });
+
+  double viewportWidth;
+  double leftEdgeGuard;
+  double rightEdgeGuard;
+
+  @override
+  bool isPointerAllowed(PointerEvent event) {
+    if (!super.isPointerAllowed(event)) {
+      return false;
+    }
+    if (viewportWidth > 0.0) {
+      final dx = event.localPosition.dx;
+      if (dx < leftEdgeGuard || dx > viewportWidth - rightEdgeGuard) {
+        return false;
+      }
+    }
+    return true;
+  }
+}
+
+/// Shared gesture detector for reader page-turn views combining full-width tap
+/// zone handling with edge-guarded horizontal drag recognition.
+Widget buildEdgeGuardedPageTurnDetector({
+  required BuildContext context,
+  required double viewportWidth,
+  required GestureTapUpCallback onTapUp,
+  required bool enableHorizontalDrag,
+  DragStartBehavior dragStartBehavior = DragStartBehavior.start,
+  GestureDragStartCallback? onHorizontalDragStart,
+  GestureDragUpdateCallback? onHorizontalDragUpdate,
+  GestureDragEndCallback? onHorizontalDragEnd,
+  GestureDragCancelCallback? onHorizontalDragCancel,
+  required Widget child,
+}) {
+  final edgeGuard = computeReaderEdgeSwipeGuard(context, viewportWidth);
+  return RawGestureDetector(
+    behavior: HitTestBehavior.opaque,
+    gestures: <Type, GestureRecognizerFactory>{
+      TapGestureRecognizer: GestureRecognizerFactoryWithHandlers<
+        TapGestureRecognizer
+      >(
+        TapGestureRecognizer.new,
+        (TapGestureRecognizer instance) {
+          instance.onTapUp = onTapUp;
+        },
+      ),
+      if (enableHorizontalDrag)
+        EdgeGuardedHorizontalDragGestureRecognizer:
+            GestureRecognizerFactoryWithHandlers<
+              EdgeGuardedHorizontalDragGestureRecognizer
+            >(
+              () => EdgeGuardedHorizontalDragGestureRecognizer(
+                viewportWidth: viewportWidth,
+                leftEdgeGuard: edgeGuard.left,
+                rightEdgeGuard: edgeGuard.right,
+              ),
+              (EdgeGuardedHorizontalDragGestureRecognizer instance) {
+                instance
+                  ..dragStartBehavior = dragStartBehavior
+                  ..viewportWidth = viewportWidth
+                  ..leftEdgeGuard = edgeGuard.left
+                  ..rightEdgeGuard = edgeGuard.right
+                  ..onStart = onHorizontalDragStart
+                  ..onUpdate = onHorizontalDragUpdate
+                  ..onEnd = onHorizontalDragEnd
+                  ..onCancel = onHorizontalDragCancel;
+              },
+            ),
+    },
+    child: child,
+  );
+}
+
 /// 60/120fps interactive 3-layer page-curl simulation view supporting touch drag,
 /// spring-back cancellation, tap-zone preservation, and programmatic turns.
 class SimulationPageCurlView extends StatefulWidget {
@@ -612,6 +734,7 @@ class _SimulationPageCurlViewState extends State<SimulationPageCurlView>
   bool _isSettlingDrag = false;
   bool _holdingCommittedTurn = false;
   bool _suppressNextDidUpdate = false;
+  int _gestureEpoch = 0;
 
   double _dragOffset = 0.0;
   double _dragStartOffset = 0.0;
@@ -644,11 +767,15 @@ class _SimulationPageCurlViewState extends State<SimulationPageCurlView>
     final pageChanged = oldWidget.pageKey != widget.pageKey;
     if (!pageChanged) return;
 
+    _gestureEpoch++;
+
     if (_suppressNextDidUpdate) {
       _suppressNextDidUpdate = false;
+      _isDragging = false;
       _holdingCommittedTurn = false;
       _isSettlingDrag = false;
       _dragOffset = 0.0;
+      _dragDeltaY = 0.0;
       _dragDirection = 0;
       _cachedDragTarget = null;
       _programmaticOutgoing = null;
@@ -661,6 +788,7 @@ class _SimulationPageCurlViewState extends State<SimulationPageCurlView>
     _isSettlingDrag = false;
     _holdingCommittedTurn = false;
     _dragOffset = 0.0;
+    _dragDeltaY = 0.0;
     _dragDirection = 0;
     _cachedDragTarget = null;
     _programmaticOutgoing = oldWidget.currentChild;
@@ -672,8 +800,12 @@ class _SimulationPageCurlViewState extends State<SimulationPageCurlView>
 
   @override
   void dispose() {
+    _gestureEpoch++;
     _animController.removeListener(_onAnimTick);
+    _animController.stop();
     _animController.dispose();
+    _cachedDragTarget = null;
+    _programmaticOutgoing = null;
     super.dispose();
   }
 
@@ -709,8 +841,10 @@ class _SimulationPageCurlViewState extends State<SimulationPageCurlView>
         final height = math.max(1.0, constraints.maxHeight);
         final size = Size(width, height);
 
-        return GestureDetector(
-          behavior: HitTestBehavior.opaque,
+        return buildEdgeGuardedPageTurnDetector(
+          context: context,
+          viewportWidth: width,
+          enableHorizontalDrag: true,
           dragStartBehavior: DragStartBehavior.down,
           onTapUp: (details) => _handleTapUp(details, width),
           onHorizontalDragStart: (details) => _onDragStart(details, size),
@@ -846,6 +980,7 @@ class _SimulationPageCurlViewState extends State<SimulationPageCurlView>
   }
 
   void _onDragStart(DragStartDetails details, Size size) {
+    _gestureEpoch++;
     _animController.stop();
     _programmaticOutgoing = null;
     _programmaticProgress = 0.0;
@@ -897,6 +1032,7 @@ class _SimulationPageCurlViewState extends State<SimulationPageCurlView>
     if (dir == 0 || _dragOffset == 0.0) {
       setState(() {
         _dragOffset = 0.0;
+        _dragDeltaY = 0.0;
         _dragDirection = 0;
         _cachedDragTarget = null;
       });
@@ -917,17 +1053,19 @@ class _SimulationPageCurlViewState extends State<SimulationPageCurlView>
         .round()
         .clamp(90, widget.turnDuration.inMilliseconds);
 
+    final epoch = _gestureEpoch;
     _isSettlingDrag = true;
     _animController.duration = Duration(milliseconds: ms);
     await _animController.forward(from: 0.0);
+    if (!mounted || epoch != _gestureEpoch) return;
     _isSettlingDrag = false;
-    if (!mounted) return;
 
     if (shouldComplete) {
       _suppressNextDidUpdate = true;
       setState(() {
         _holdingCommittedTurn = true;
         _dragOffset = 0.0;
+        _dragDeltaY = 0.0;
         _dragDirection = 0;
       });
       try {
@@ -937,7 +1075,7 @@ class _SimulationPageCurlViewState extends State<SimulationPageCurlView>
           await widget.onPrevPage();
         }
       } finally {
-        if (mounted && _suppressNextDidUpdate) {
+        if (mounted && epoch == _gestureEpoch && _suppressNextDidUpdate) {
           _suppressNextDidUpdate = false;
           setState(() {
             _holdingCommittedTurn = false;
@@ -948,6 +1086,7 @@ class _SimulationPageCurlViewState extends State<SimulationPageCurlView>
     } else {
       setState(() {
         _dragOffset = 0.0;
+        _dragDeltaY = 0.0;
         _dragDirection = 0;
         _cachedDragTarget = null;
       });
@@ -957,20 +1096,30 @@ class _SimulationPageCurlViewState extends State<SimulationPageCurlView>
   void _cancelDrag() {
     if (!_isDragging) return;
     _isDragging = false;
+    if (_dragOffset == 0.0 || _dragDirection == 0) {
+      setState(() {
+        _dragOffset = 0.0;
+        _dragDeltaY = 0.0;
+        _dragDirection = 0;
+        _cachedDragTarget = null;
+      });
+      return;
+    }
+    final epoch = _gestureEpoch;
     _dragStartOffset = _dragOffset;
     _dragEndOffset = 0.0;
     _isSettlingDrag = true;
     _animController.duration = const Duration(milliseconds: 180);
     unawaited(
       _animController.forward(from: 0.0).whenComplete(() {
+        if (!mounted || epoch != _gestureEpoch) return;
         _isSettlingDrag = false;
-        if (mounted) {
-          setState(() {
-            _dragOffset = 0.0;
-            _dragDirection = 0;
-            _cachedDragTarget = null;
-          });
-        }
+        setState(() {
+          _dragOffset = 0.0;
+          _dragDeltaY = 0.0;
+          _dragDirection = 0;
+          _cachedDragTarget = null;
+        });
       }),
     );
   }
