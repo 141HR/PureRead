@@ -39,9 +39,16 @@ class MainActivity : FlutterActivity() {
     private var initialDisplayCutoutMode: Int? = null
     private var preImmersiveSystemBarsBehavior: Int? = null
     private var preImmersiveSystemUiVisibility: Int? = null
+    private var ttsChannelHandler: TtsChannelHandler? = null
 
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)
+
+        ttsChannelHandler?.dispose()
+        ttsChannelHandler = TtsChannelHandler(
+            applicationContext,
+            flutterEngine.dartExecutor.binaryMessenger,
+        )
 
         MethodChannel(
             flutterEngine.dartExecutor.binaryMessenger,
@@ -423,6 +430,8 @@ class MainActivity : FlutterActivity() {
         runCatching {
             window?.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
         }
+        ttsChannelHandler?.dispose()
+        ttsChannelHandler = null
         ioExecutor.shutdownNow()
         super.onDestroy()
     }
