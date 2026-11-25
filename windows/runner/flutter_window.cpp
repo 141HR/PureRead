@@ -90,6 +90,8 @@ bool FlutterWindow::OnCreate() {
   }
   RegisterPlugins(flutter_controller_->engine());
   SetupPlatformChannel();
+  tts_channel_handler_ = std::make_unique<TtsChannelHandler>(
+      flutter_controller_->engine()->messenger(), GetHandle());
   SetChildContent(flutter_controller_->view()->GetNativeWindow());
 
   flutter_controller_->engine()->SetNextFrameCallback([&]() {
@@ -105,6 +107,10 @@ bool FlutterWindow::OnCreate() {
 }
 
 void FlutterWindow::OnDestroy() {
+  if (tts_channel_handler_) {
+    tts_channel_handler_->Shutdown();
+    tts_channel_handler_.reset();
+  }
   if (platform_channel_) {
     platform_channel_->SetMethodCallHandler(nullptr);
     platform_channel_.reset();
@@ -330,6 +336,11 @@ FlutterWindow::MessageHandler(HWND hwnd, UINT const message,
     case WM_FONTCHANGE:
       flutter_controller_->engine()->ReloadSystemFonts();
       break;
+    case TtsChannelHandler::kWmTtsEvent:
+      if (tts_channel_handler_) {
+        tts_channel_handler_->ProcessSapiEvents();
+      }
+      return 0;
   }
 
   return Win32Window::MessageHandler(hwnd, message, wparam, lparam);

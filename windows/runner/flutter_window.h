@@ -11,6 +11,7 @@
 #include <string>
 #include <vector>
 
+#include "tts_channel_handler.h"
 #include "win32_window.h"
 
 // A window that hosts a Flutter view and PureRead's native Win32 platform channel.
@@ -47,6 +48,9 @@ class FlutterWindow : public Win32Window {
   // Zero-plugin platform bridge channel.
   std::unique_ptr<flutter::MethodChannel<flutter::EncodableValue>>
       platform_channel_;
+
+  // Windows SAPI 5 / OneCore TTS channel handler.
+  std::unique_ptr<TtsChannelHandler> tts_channel_handler_;
 
   // Fullscreen restore state.
   bool is_fullscreen_ = false;
