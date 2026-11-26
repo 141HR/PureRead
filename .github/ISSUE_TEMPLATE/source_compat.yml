@@ -1,0 +1,62 @@
+name: 🧩 书源兼容性问题（Source Compatibility）
+description: 报告 Legado JSON 书源或 JS 插件书源在无头解析、加密、DOM 提取等环节的兼容异常
+title: "[Source]: "
+labels:
+  - "area: source-compat"
+body:
+  - type: markdown
+    attributes:
+      value: |
+        请先在 PureRead 内置的 **书源调试工作台（4 步调试面板）** 验证规则。
+        **重要合规提示**：请**仅提供脱敏后的最小规则片段与调试报错堆栈**，严禁上传盗版站点完整书源合集或受版权保护的小说正文！
+
+  - type: dropdown
+    id: engine_type
+    attributes:
+      label: 书源引擎类型（Engine Type）
+      options:
+        - Legado JSON
+        - JS Plugin
+    validations:
+      required: true
+
+  - type: dropdown
+    id: stage
+    attributes:
+      label: 失败阶段（Failure Stage）
+      options:
+        - Search（搜索）
+        - Detail（详情/元信息）
+        - TOC（目录）
+        - Content（正文提取）
+        - Import / Check（导入或体检）
+    validations:
+      required: true
+
+  - type: textarea
+    id: rule_snippet
+    attributes:
+      label: 最小脱敏规则片段（Minimal Redacted Rule Snippet）
+      description: 请将目标站点域名替换为 example.com 等占位符，仅保留触发异常的规则字段或 JS 表达式
+      render: json
+    validations:
+      required: true
+
+  - type: textarea
+    id: debug_trace
+    attributes:
+      label: 调试工作台输出与报错信息（Debug Trace / Error）
+      description: 粘贴 4 步调试面板中展示的 HTTP 状态、命中字段、错误类型与错误信息（注意移除 Cookie / 真实正文）
+      render: text
+    validations:
+      required: true
+
+  - type: checkboxes
+    id: compliance
+    attributes:
+      label: 合规与排障确认
+      options:
+        - label: 我已脱敏站点 URL，且确认未包含任何版权小说正文或完整第三方书源包。
+          required: true
+        - label: "我已确认该规则不依赖 `webView: true` 人机验证或强前端浏览器渲染（PureRead 采用无头沙箱解析）。"
+          required: false

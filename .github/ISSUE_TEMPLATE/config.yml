@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: 📚 项目文档与架构说明（Docs）
+    url: https://github.com/141HR/PureRead/tree/master/docs
+    about: 查看项目章程、PRD、系统架构、数据库 Schema 及书源兼容性报告
+  - name: 🔒 安全漏洞私密披露（Security Policy）
+    url: https://github.com/141HR/PureRead/security/policy
+    about: 发现沙箱逃逸、压缩包解析或安全漏洞时请勿公开提 Issue，请通过 Security Advisory 私密上报

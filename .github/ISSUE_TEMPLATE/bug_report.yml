@@ -1,0 +1,80 @@
+name: 🐛 Bug 反馈（Bug Report）
+description: 报告应用崩溃、排版异常、翻页卡顿、TTS/自动阅读或备份恢复问题
+title: "[Bug]: "
+labels:
+  - bug
+body:
+  - type: markdown
+    attributes:
+      value: |
+        感谢提交 Bug 反馈！请尽量填写完整信息以便我们快速复现与定位。
+        提交前请先检索已有 Issues，避免重复提交；**请勿粘贴受版权保护的小说正文或完整盗版书源合集**。
+
+  - type: dropdown
+    id: platform
+    attributes:
+      label: 目标平台（Platform）
+      options:
+        - Windows (x64)
+        - Android
+        - Windows & Android
+    validations:
+      required: true
+
+  - type: dropdown
+    id: area
+    attributes:
+      label: 问题所属模块（Area）
+      options:
+        - 阅读排版与翻页引擎（Reader Engine）
+        - 本地 TXT / EPUB 解析与插图
+        - TTS 听书与自动阅读（TTS / Auto-Read）
+        - 书架、搜索、书源调试与正文净化
+        - 数据库与 .pureread.zip 备份恢复
+        - UI 交互 / 其他
+    validations:
+      required: true
+
+  - type: input
+    id: app_version
+    attributes:
+      label: 应用版本（App Version）
+      description: 可在「设置与备份 -> 关于 PureRead」或 Release 文件名中查看
+      placeholder: 例如：v0.5.0+5
+    validations:
+      required: true
+
+  - type: input
+    id: os_device
+    attributes:
+      label: 操作系统与设备信息（OS / Device）
+      placeholder: 例如：Windows 11 25H2 / Android 15 (arm64-v8a)
+    validations:
+      required: true
+
+  - type: textarea
+    id: steps
+    attributes:
+      label: 复现步骤（Steps to Reproduce）
+      description: 请按顺序描述触发该问题的操作步骤
+      placeholder: |
+        1. 打开书籍（格式：TXT / EPUB / 在线书源）...
+        2. 切换至某功能或执行操作...
+        3. 观察到异常...
+    validations:
+      required: true
+
+  - type: textarea
+    id: behavior
+    attributes:
+      label: 预期行为与实际表现（Expected vs Actual）
+      description: 说明你原本预期的正常表现，以及实际发生的错误表现
+    validations:
+      required: true
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: 错误日志、调试输出或截图（Logs / Screenshots）
+      description: 如有异常提示、书源调试日志或屏幕截图，请粘贴或拖拽上传至此（注意脱敏）
+      render: text

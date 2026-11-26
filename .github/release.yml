@@ -1,0 +1,37 @@
+changelog:
+  exclude:
+    labels:
+      - duplicate
+      - invalid
+      - wontfix
+    authors:
+      - dependabot
+  categories:
+    - title: ✨ Features
+      labels:
+        - enhancement
+    - title: 🐛 Bug Fixes
+      labels:
+        - bug
+    - title: 📖 Reader Engine & EPUB
+      labels:
+        - "area: reader-engine"
+        - "area: epub"
+    - title: 🔊 TTS & Auto-Read
+      labels:
+        - "area: tts"
+    - title: 🧩 Source Compatibility
+      labels:
+        - "area: source-compat"
+    - title: 📚 Documentation
+      labels:
+        - documentation
+    - title: ⚙️ CI/CD & Maintenance
+      labels:
+        - "ci/cd"
+    - title: 📦 Dependencies
+      labels:
+        - dependencies
+    - title: 📌 Other Changes
+      labels:
+        - "*"
