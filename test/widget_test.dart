@@ -20,6 +20,11 @@ void main() {
     expect(find.byType(DesktopShell), findsNothing);
     expect(find.byType(NavigationBar), findsOneWidget);
 
+    await tester.tap(find.text('发现').last);
+    await tester.pumpAndSettle();
+    expect(find.text('发现与排行榜'), findsOneWidget);
+    expect(find.text('前往书源管理'), findsOneWidget);
+
     await tester.tap(find.text('搜索').last);
     await tester.pumpAndSettle();
     expect(find.textContaining('多源聚合搜索'), findsOneWidget);
@@ -27,6 +32,7 @@ void main() {
     await tester.tap(find.text('设置').last);
     await tester.pumpAndSettle();
     expect(find.textContaining('.pureread.zip'), findsOneWidget);
+    expect(tester.takeException(), isNull);
   });
 
   testWidgets(
@@ -46,6 +52,11 @@ void main() {
       expect(find.text('导入 EPUB'), findsOneWidget);
       expect(find.text('预览阅读器占位页'), findsNothing);
 
+      await tester.tap(find.text('发现').last);
+      await tester.pumpAndSettle();
+      expect(find.text('发现与排行榜'), findsOneWidget);
+      expect(find.text('前往书源管理'), findsOneWidget);
+
       await tester.tap(find.text('搜索').last);
       await tester.pumpAndSettle();
       expect(find.textContaining('多源聚合搜索'), findsOneWidget);
@@ -53,6 +64,7 @@ void main() {
       await tester.tap(find.text('设置').last);
       await tester.pumpAndSettle();
       expect(find.textContaining('.pureread.zip'), findsOneWidget);
+      expect(tester.takeException(), isNull);
     },
   );
 }
