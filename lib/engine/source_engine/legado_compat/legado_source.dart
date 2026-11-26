@@ -60,6 +60,60 @@ class LegadoSearchRule {
   }
 }
 
+/// Legado `ruleExplore` rule subset.
+class LegadoExploreRule {
+  final String bookList;
+  final String name;
+  final String author;
+  final String bookUrl;
+  final String coverUrl;
+  final String intro;
+  final String lastChapter;
+  final String kind;
+  final String wordCount;
+  final bool webView;
+
+  const LegadoExploreRule({
+    this.bookList = '',
+    this.name = '',
+    this.author = '',
+    this.bookUrl = '',
+    this.coverUrl = '',
+    this.intro = '',
+    this.lastChapter = '',
+    this.kind = '',
+    this.wordCount = '',
+    this.webView = false,
+  });
+
+  factory LegadoExploreRule.fromJson(Map<String, dynamic> json) {
+    return LegadoExploreRule(
+      bookList: (json['bookList'] ?? '').toString(),
+      name: (json['name'] ?? '').toString(),
+      author: (json['author'] ?? '').toString(),
+      bookUrl: (json['bookUrl'] ?? '').toString(),
+      coverUrl: (json['coverUrl'] ?? '').toString(),
+      intro: (json['intro'] ?? '').toString(),
+      lastChapter: (json['lastChapter'] ?? '').toString(),
+      kind: (json['kind'] ?? '').toString(),
+      wordCount: (json['wordCount'] ?? '').toString(),
+      webView: json['webView'] == true,
+    );
+  }
+
+  bool get isEmpty =>
+      bookList.trim().isEmpty &&
+      name.trim().isEmpty &&
+      author.trim().isEmpty &&
+      bookUrl.trim().isEmpty &&
+      coverUrl.trim().isEmpty &&
+      intro.trim().isEmpty &&
+      lastChapter.trim().isEmpty &&
+      kind.trim().isEmpty &&
+      wordCount.trim().isEmpty &&
+      !webView;
+}
+
 /// Legado `ruleBookInfo` rule subset.
 class LegadoBookInfoRule {
   final String init;
@@ -184,9 +238,11 @@ class LegadoBookSource {
   final int bookSourceType;
   final String bookSourceComment;
   final bool enabled;
+  final bool enabledExplore;
   final int weight;
   final int rateLimitMs;
   final String? searchUrl;
+  final String? exploreUrl;
   final String? loginUrl;
   final String? jsLib;
   final String? rawHeader;
@@ -194,6 +250,7 @@ class LegadoBookSource {
   final String? charset;
   final bool webView;
   final LegadoSearchRule ruleSearch;
+  final LegadoExploreRule ruleExplore;
   final LegadoBookInfoRule ruleBookInfo;
   final LegadoTocRule ruleToc;
   final LegadoContentRule ruleContent;
@@ -208,9 +265,11 @@ class LegadoBookSource {
     this.bookSourceType = 0,
     this.bookSourceComment = '',
     this.enabled = true,
+    this.enabledExplore = true,
     this.weight = 0,
     this.rateLimitMs = 500,
     this.searchUrl,
+    this.exploreUrl,
     this.loginUrl,
     this.jsLib,
     this.rawHeader,
@@ -218,6 +277,7 @@ class LegadoBookSource {
     this.charset,
     this.webView = false,
     required this.ruleSearch,
+    this.ruleExplore = const LegadoExploreRule(),
     required this.ruleBookInfo,
     required this.ruleToc,
     required this.ruleContent,
@@ -227,6 +287,10 @@ class LegadoBookSource {
   /// Effective base URL with any `#fragment` tag stripped for HTTP resolution.
   String get effectiveBaseUrl =>
       normalizedBaseUrl.isNotEmpty ? normalizedBaseUrl : bookSourceUrl;
+
+  /// Whether online discovery/explore is enabled and configured.
+  bool get hasExplore =>
+      enabledExplore && (exploreUrl?.trim().isNotEmpty ?? false);
 
   factory LegadoBookSource.fromJsonString(String rawJson) {
     final decoded = jsonDecode(_stripBom(rawJson).trim());
@@ -256,6 +320,9 @@ class LegadoBookSource {
     final rawHeader = json['header'] is Map
         ? jsonEncode(json['header'])
         : json['header']?.toString();
+    final rawExploreUrl = json['exploreUrl'] is List || json['exploreUrl'] is Map
+        ? jsonEncode(json['exploreUrl'])
+        : json['exploreUrl']?.toString();
 
     return LegadoBookSource(
       bookSourceName:
@@ -269,11 +336,15 @@ class LegadoBookSource {
       enabled: json['enabled'] is bool
           ? json['enabled'] as bool
           : json['enabled']?.toString().toLowerCase() != 'false',
+      enabledExplore: json['enabledExplore'] is bool
+          ? json['enabledExplore'] as bool
+          : json['enabledExplore']?.toString().toLowerCase() != 'false',
       weight: json['weight'] is int
           ? json['weight'] as int
           : int.tryParse(json['weight']?.toString() ?? '') ?? 0,
       rateLimitMs: parseConcurrentRateMs(json['concurrentRate']),
       searchUrl: _normalizeOptional(json['searchUrl']),
+      exploreUrl: _normalizeOptional(rawExploreUrl),
       loginUrl: _normalizeOptional(json['loginUrl']),
       jsLib: _normalizeOptional(json['jsLib']),
       rawHeader: _normalizeOptional(rawHeader),
@@ -281,6 +352,7 @@ class LegadoBookSource {
       charset: _normalizeOptional(json['charset']),
       webView: json['webView'] == true,
       ruleSearch: LegadoSearchRule.fromJson(_asMap(json['ruleSearch'])),
+      ruleExplore: LegadoExploreRule.fromJson(_asMap(json['ruleExplore'])),
       ruleBookInfo: LegadoBookInfoRule.fromJson(_asMap(json['ruleBookInfo'])),
       ruleToc: LegadoTocRule.fromJson(_asMap(json['ruleToc'])),
       ruleContent: LegadoContentRule.fromJson(_asMap(json['ruleContent'])),
@@ -368,6 +440,32 @@ class LegadoBookSource {
       final decoded = jsonDecode(normalized);
       if (decoded is Map) {
         return decoded.map((k, v) => MapEntry(k.toString(), v));
+      }
+    } on FormatException {
+      return null;
+    }
+    return null;
+  }
+
+  /// Parses strict JSON arrays and lenient JS-array literals (single quotes,
+  /// unquoted keys, trailing commas) without invoking JS.
+  static List<dynamic>? tryParseLenientJsonList(String raw) {
+    final trimmed = raw.trim();
+    if (!trimmed.startsWith('[') || !trimmed.endsWith(']')) return null;
+    try {
+      final decoded = jsonDecode(trimmed);
+      if (decoded is List<dynamic>) {
+        return decoded;
+      }
+    } on FormatException {
+      // Fall through to lenient normalizer.
+    }
+
+    final normalized = _normalizeLenientJson(trimmed);
+    try {
+      final decoded = jsonDecode(normalized);
+      if (decoded is List<dynamic>) {
+        return decoded;
       }
     } on FormatException {
       return null;
@@ -821,6 +919,7 @@ class LegadoSourceParser {
   static Set<String> _detectFeatures(LegadoBookSource s, String blob) {
     final f = <String>{};
     if ((s.searchUrl ?? '').isNotEmpty) f.add('searchUrl');
+    if ((s.exploreUrl ?? '').isNotEmpty) f.add('exploreUrl');
     if ((s.loginUrl ?? '').isNotEmpty) f.add('loginUrl');
     if (s.hasFragmentTag) f.add('fragmentUrl');
     if ((s.charset ?? '').toLowerCase().contains('gb') ||
@@ -874,6 +973,14 @@ class LegadoSourceParser {
       s.ruleSearch.name,
       s.ruleSearch.author,
       s.ruleSearch.bookUrl,
+      s.ruleExplore.bookList,
+      s.ruleExplore.name,
+      s.ruleExplore.author,
+      s.ruleExplore.bookUrl,
+      s.ruleExplore.coverUrl,
+      s.ruleExplore.intro,
+      s.ruleExplore.lastChapter,
+      s.ruleExplore.kind,
       s.ruleBookInfo.init,
       s.ruleBookInfo.name,
       s.ruleToc.chapterList,

@@ -3,11 +3,13 @@ import 'dart:convert';
 import '../../../domain/domain.dart';
 import '../../../infrastructure/js/qjs_sandbox_runtime.dart';
 import '../../../infrastructure/network/source_http_client.dart';
+import '../legado_compat/legado_explore_parser.dart';
 import '../parsing/legado_selector_engine.dart';
 
-/// Executes a 4-method (`search`, `detail`, `toc`, `content`) JavaScript
-/// book-source plugin inside a sandboxed [QjsSandboxRuntime].
-class JsPluginProvider implements BookProvider {
+/// Executes a JavaScript book-source plugin (`search`, `detail`, `toc`,
+/// `content`, and optional `exploreCategories` / `explore`) inside a sandboxed
+/// [QjsSandboxRuntime].
+class JsPluginProvider implements ExplorableBookProvider {
   @override
   final String providerId;
 
@@ -18,16 +20,18 @@ class JsPluginProvider implements BookProvider {
   final int rateLimitMs;
   final Duration scriptTimeout;
   final int memoryLimitBytes;
+  final bool _supportsExplore;
 
   @override
   ProviderType get type => ProviderType.jsPlugin;
 
   @override
-  ProviderCapabilities get capabilities => const ProviderCapabilities(
+  ProviderCapabilities get capabilities => ProviderCapabilities(
     isLocal: false,
     supportsSearch: true,
     supportsUpdateCheck: true,
     supportsChangeSource: true,
+    supportsExplore: _supportsExplore,
   );
 
   JsPluginProvider({
@@ -39,7 +43,7 @@ class JsPluginProvider implements BookProvider {
     this.rateLimitMs = 500,
     this.scriptTimeout = const Duration(seconds: 5),
     this.memoryLimitBytes = QjsSandboxRuntime.defaultMemoryLimitBytes,
-  });
+  }) : _supportsExplore = _detectExploreSupport(pluginScript);
 
   @override
   Future<({List<BookSearchItem> items, SourceDebugTrace trace})> search(
@@ -53,19 +57,77 @@ class JsPluginProvider implements BookProvider {
       args: <Object?>[keyword, page],
       cancelToken: cancelToken,
     );
+    return _parseBookSearchItemsResult(res, step: 'search');
+  }
 
-    final rawList = _decodeJsonList(res.value, step: 'search');
+  @override
+  Future<({List<ExploreCategory> categories, SourceDebugTrace trace})>
+  getExploreCategories({CancellationToken? cancelToken}) async {
+    final res = await _invokePluginMethod(
+      step: 'explore_categories',
+      methodName: 'exploreCategories',
+      args: const <Object?>[],
+      cancelToken: cancelToken,
+    );
+
+    final categories = _decodeExploreCategories(res.value);
+    return (
+      categories: categories,
+      trace: SourceDebugTrace(
+        step: res.trace.step,
+        elapsedMs: res.trace.elapsedMs,
+        httpStatus: res.trace.httpStatus,
+        requestUrl: res.trace.requestUrl,
+        matchedPreview: categories.isEmpty
+            ? '0 categories'
+            : '${categories.length} categories (first: ${categories.first.title})',
+        logs: res.trace.logs,
+      ),
+    );
+  }
+
+  @override
+  Future<({List<BookSearchItem> items, SourceDebugTrace trace})> explore(
+    ExploreCategory category, {
+    int page = 1,
+    CancellationToken? cancelToken,
+  }) async {
+    cancelToken?.throwIfCancelled();
+    if (category.url.trim().isEmpty) {
+      throw SourceParseFailure(
+        message:
+            'ExploreCategory "${category.title}" has empty url (group headers cannot be explored directly)',
+        sourceId: providerId,
+        step: 'explore',
+      );
+    }
+
+    final res = await _invokePluginMethod(
+      step: 'explore',
+      methodName: 'explore',
+      args: <Object?>[category.url, page, category.title],
+      cancelToken: cancelToken,
+    );
+    return _parseBookSearchItemsResult(res, step: 'explore');
+  }
+
+  ({List<BookSearchItem> items, SourceDebugTrace trace})
+  _parseBookSearchItemsResult(
+    ({String value, SourceDebugTrace trace}) res, {
+    required String step,
+  }) {
+    final rawList = _decodeJsonList(res.value, step: step);
     final items = rawList
         .map((raw) {
-          final map = _asStringMap(raw, step: 'search');
+          final map = _asStringMap(raw, step: step);
           final bookUrl = _resolveUrl(
-            _readRequiredString(map, 'bookUrl', 'search'),
+            _readRequiredString(map, 'bookUrl', step),
           );
           return BookSearchItem(
             sourceId: providerId,
             providerType: type,
             bookUrl: bookUrl,
-            title: _readRequiredString(map, 'title', 'search'),
+            title: _readRequiredString(map, 'title', step),
             author: (map['author'] ?? '').toString().trim(),
             coverUrl: _nullableResolvedUrl(map['coverUrl']?.toString()),
             intro: (map['intro'] ?? '').toString().trim(),
@@ -90,6 +152,143 @@ class JsPluginProvider implements BookProvider {
         logs: res.trace.logs,
       ),
     );
+  }
+
+  List<ExploreCategory> _decodeExploreCategories(String rawValue) {
+    final trimmed = rawValue.trim();
+    if (trimmed.isEmpty) return const <ExploreCategory>[];
+
+    if (trimmed.startsWith('[')) {
+      final rawList = _decodeJsonList(trimmed, step: 'explore_categories');
+      if (rawList.every((item) => item is String)) {
+        return LegadoExploreParser.parse(
+          rawList.map((e) => e.toString()).join('\n'),
+        );
+      }
+      final categories = <ExploreCategory>[];
+      String? currentGroup;
+      for (final raw in rawList) {
+        final map = _asStringMap(raw, step: 'explore_categories');
+        final title = _readRequiredString(map, 'title', 'explore_categories');
+        final url = (map['url']?.toString() ?? '').trim();
+        final explicitGroup = _nullableTrimmed(map['group']?.toString());
+        final flex = LegadoExploreParser.extractFlexBasisPercent(map);
+        if (url.isEmpty) {
+          currentGroup = title;
+          categories.add(
+            ExploreCategory(
+              title: title,
+              url: '',
+              group: explicitGroup,
+              layoutFlexBasisPercent: flex,
+            ),
+          );
+        } else {
+          categories.add(
+            ExploreCategory(
+              title: title,
+              url: url,
+              group: explicitGroup ?? currentGroup,
+              layoutFlexBasisPercent: flex,
+            ),
+          );
+        }
+      }
+      return List<ExploreCategory>.unmodifiable(categories);
+    }
+
+    if (trimmed.startsWith('{')) {
+      throw SourceParseFailure(
+        message:
+            'Expected JSON array or explore string from explore_categories, got object',
+        sourceId: providerId,
+        step: 'explore_categories',
+      );
+    }
+
+    return LegadoExploreParser.parse(rawValue);
+  }
+
+  static final RegExp _exploreFunctionDeclPattern = RegExp(
+    r'\b(?:async\s+)?function\s+(?:exploreCategories|explore)\s*\(',
+  );
+  static final RegExp _exploreVarAssignPattern = RegExp(
+    r'\b(?:const|let|var)\s+(?:exploreCategories|explore)\s*=',
+  );
+  static final RegExp _exploreExportAssignPattern = RegExp(
+    r'\b(?:exports|module\.exports|globalThis(?:\.plugin)?)\s*\.\s*(?:exploreCategories|explore)\s*=',
+  );
+  static final RegExp _exploreObjectMethodPattern = RegExp(
+    r'(?:^|[{,;\s])(?:async\s+)?(?:exploreCategories|explore)\s*\([^)]*\)\s*\{',
+  );
+  static final RegExp _exploreObjectPropPattern = RegExp(
+    r'''(?:^|[{,;\s])(?:["']?)(?:exploreCategories|explore)(?:["']?)\s*:\s*(?:async\b|function\b|\(|(?!(?:true|false|null|undefined)\b)[A-Za-z_$][\w$]*(?:\s*=>|\s*[,}\n]))''',
+  );
+
+  static bool _detectExploreSupport(String script) {
+    final stripped = _stripJsComments(script);
+    return _exploreFunctionDeclPattern.hasMatch(stripped) ||
+        _exploreVarAssignPattern.hasMatch(stripped) ||
+        _exploreExportAssignPattern.hasMatch(stripped) ||
+        _exploreObjectMethodPattern.hasMatch(stripped) ||
+        _exploreObjectPropPattern.hasMatch(stripped);
+  }
+
+  static String _stripJsComments(String script) {
+    final out = StringBuffer();
+    var inSingle = false;
+    var inDouble = false;
+    var inTemplate = false;
+
+    for (var i = 0; i < script.length; i++) {
+      final ch = script[i];
+      if (inSingle || inDouble || inTemplate) {
+        out.write(ch);
+        if (ch == r'\' && i + 1 < script.length) {
+          i++;
+          out.write(script[i]);
+        } else if (inSingle && ch == "'") {
+          inSingle = false;
+        } else if (inDouble && ch == '"') {
+          inDouble = false;
+        } else if (inTemplate && ch == '`') {
+          inTemplate = false;
+        }
+        continue;
+      }
+
+      if (ch == '/' && i + 1 < script.length) {
+        final next = script[i + 1];
+        if (next == '/') {
+          i += 2;
+          while (i < script.length && script[i] != '\n') {
+            i++;
+          }
+          out.write('\n');
+          continue;
+        }
+        if (next == '*') {
+          i += 2;
+          while (i + 1 < script.length &&
+              !(script[i] == '*' && script[i + 1] == '/')) {
+            if (script[i] == '\n') out.write('\n');
+            i++;
+          }
+          i++;
+          continue;
+        }
+      }
+
+      if (ch == "'") {
+        inSingle = true;
+      } else if (ch == '"') {
+        inDouble = true;
+      } else if (ch == '`') {
+        inTemplate = true;
+      }
+      out.write(ch);
+    }
+    return out.toString();
   }
 
   @override

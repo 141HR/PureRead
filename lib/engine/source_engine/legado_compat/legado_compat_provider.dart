@@ -1,10 +1,23 @@
 import '../../../domain/domain.dart';
 import '../../../infrastructure/network/source_http_client.dart';
+import 'legado_explore_parser.dart';
 import 'legado_rule_evaluator.dart';
 import 'legado_source.dart';
 
-/// Progressive Legado v3 JSON book source driver (`BookProvider` implementation).
-class LegadoCompatProvider implements BookProvider {
+typedef _BookListRules = ({
+  String bookList,
+  String name,
+  String author,
+  String bookUrl,
+  String coverUrl,
+  String intro,
+  String lastChapter,
+  String kind,
+});
+
+/// Progressive Legado v3 JSON book source driver (`ExplorableBookProvider`
+/// implementation).
+class LegadoCompatProvider implements ExplorableBookProvider {
   @override
   final String providerId;
   final LegadoBookSource source;
@@ -23,6 +36,7 @@ class LegadoCompatProvider implements BookProvider {
   String _bookName = '';
   String _bookUrl = '';
   String _tocUrl = '';
+  List<ExploreCategory>? _cachedExploreCategories;
 
   LegadoEvalSession _createSession({
     String? bookUrl,
@@ -67,6 +81,7 @@ class LegadoCompatProvider implements BookProvider {
     supportsSearch: (source.searchUrl ?? '').trim().isNotEmpty,
     supportsUpdateCheck: true,
     supportsChangeSource: true,
+    supportsExplore: source.hasExplore,
   );
 
   LegadoCompatProvider({
@@ -223,115 +238,16 @@ class LegadoCompatProvider implements BookProvider {
       );
     }
 
-    final blocks = blocksRes.reversed
-        ? blocksRes.items.reversed.toList(growable: false)
-        : blocksRes.items;
-
-    final items = <BookSearchItem>[];
-    for (final block in blocks) {
-      cancelToken?.throwIfCancelled();
-      final title = await evaluator.evaluateString(
-        block,
-        source.ruleSearch.name,
-        baseUrl: resp.finalUrl,
-        keyword: keyword,
-        page: page,
-        session: session,
-        cancelToken: cancelToken,
-      );
-      final rawBookUrl = source.ruleSearch.bookUrl.trim().isEmpty
-          ? resp.finalUrl
-          : await evaluator.evaluateString(
-              block,
-              source.ruleSearch.bookUrl,
-              baseUrl: resp.finalUrl,
-              keyword: keyword,
-              page: page,
-              session: session,
-              cancelToken: cancelToken,
-            );
-      if (title.isEmpty || rawBookUrl.isEmpty) {
-        continue;
-      }
-
-      final author = source.ruleSearch.author.isEmpty
-          ? ''
-          : await evaluator.evaluateString(
-              block,
-              source.ruleSearch.author,
-              baseUrl: resp.finalUrl,
-              keyword: keyword,
-              page: page,
-              session: session,
-              cancelToken: cancelToken,
-            );
-      final coverUrl = source.ruleSearch.coverUrl.isEmpty
-          ? null
-          : _resolveOptional(
-              await evaluator.evaluateString(
-                block,
-                source.ruleSearch.coverUrl,
-                baseUrl: resp.finalUrl,
-                keyword: keyword,
-                page: page,
-                session: session,
-                cancelToken: cancelToken,
-              ),
-              resp.finalUrl,
-            );
-      final intro = source.ruleSearch.intro.isEmpty
-          ? ''
-          : await evaluator.evaluateString(
-              block,
-              source.ruleSearch.intro,
-              baseUrl: resp.finalUrl,
-              keyword: keyword,
-              page: page,
-              session: session,
-              cancelToken: cancelToken,
-            );
-      final lastChapter = source.ruleSearch.lastChapter.isEmpty
-          ? ''
-          : await evaluator.evaluateString(
-              block,
-              source.ruleSearch.lastChapter,
-              baseUrl: resp.finalUrl,
-              keyword: keyword,
-              page: page,
-              session: session,
-              cancelToken: cancelToken,
-            );
-      final kind = source.ruleSearch.kind.isEmpty
-          ? null
-          : _nullableTrimmed(
-              await evaluator.evaluateString(
-                block,
-                source.ruleSearch.kind,
-                baseUrl: resp.finalUrl,
-                keyword: keyword,
-                page: page,
-                session: session,
-                cancelToken: cancelToken,
-              ),
-            );
-
-      items.add(
-        BookSearchItem(
-          sourceId: providerId,
-          providerType: type,
-          bookUrl: LegadoRuleEvaluator.resolveUrlSpec(
-            rawBookUrl,
-            resp.finalUrl,
-          ),
-          title: title,
-          author: author,
-          coverUrl: coverUrl,
-          intro: intro,
-          latestChapterTitle: lastChapter,
-          kind: kind,
-        ),
-      );
-    }
+    final items = await _extractBookListItems(
+      blocks: blocksRes.items,
+      reversed: blocksRes.reversed,
+      rules: _searchRules,
+      baseUrl: resp.finalUrl,
+      keyword: keyword,
+      page: page,
+      session: session,
+      cancelToken: cancelToken,
+    );
 
     sw.stop();
     return (
@@ -350,6 +266,359 @@ class LegadoCompatProvider implements BookProvider {
     } finally {
       _syncSession(session);
     }
+  }
+
+  static const String _exploreRawJsPrefix = '__PURE_EXPLORE_RAW__:';
+
+  @override
+  Future<({List<ExploreCategory> categories, SourceDebugTrace trace})>
+  getExploreCategories({CancellationToken? cancelToken}) async {
+    cancelToken?.throwIfCancelled();
+    final sw = Stopwatch()..start();
+    if (!source.hasExplore) {
+      sw.stop();
+      return (
+        categories: const <ExploreCategory>[],
+        trace: SourceDebugTrace(
+          step: 'explore_categories',
+          elapsedMs: sw.elapsedMilliseconds,
+          matchedPreview: '0 categories (explore disabled or unconfigured)',
+        ),
+      );
+    }
+
+    final cached = _cachedExploreCategories;
+    if (cached != null) {
+      sw.stop();
+      return (
+        categories: cached,
+        trace: SourceDebugTrace(
+          step: 'explore_categories',
+          elapsedMs: sw.elapsedMilliseconds,
+          matchedPreview: '${cached.length} categories (cached)',
+        ),
+      );
+    }
+
+    final rawExploreUrl = source.exploreUrl!.trim();
+    final lowerExplore = rawExploreUrl.toLowerCase();
+    final hasJs =
+        lowerExplore.contains('<js>') || lowerExplore.startsWith('@js:');
+
+    var resolvedExploreSpec = rawExploreUrl;
+    var logs = const <String>[];
+    if (hasJs) {
+      evaluator.guardUnsupportedRules(<String?>[
+        rawExploreUrl,
+        source.rawHeader,
+        source.jsLib,
+      ]);
+      final session = _createSession();
+      try {
+        final wrappedRule = _wrapExploreJsRule(rawExploreUrl);
+        final evaluated = await evaluator.evaluateString(
+          '',
+          wrappedRule,
+          baseUrl: source.effectiveBaseUrl,
+          session: session,
+          cancelToken: cancelToken,
+        );
+        resolvedExploreSpec = evaluated.startsWith(_exploreRawJsPrefix)
+            ? evaluated.substring(_exploreRawJsPrefix.length)
+            : evaluated;
+        logs = List<String>.unmodifiable(session.logs);
+      } finally {
+        _syncSession(session);
+      }
+    }
+
+    final parsed = List<ExploreCategory>.unmodifiable(
+      LegadoExploreParser.parse(resolvedExploreSpec),
+    );
+    _cachedExploreCategories = parsed;
+    sw.stop();
+    return (
+      categories: parsed,
+      trace: SourceDebugTrace(
+        step: 'explore_categories',
+        elapsedMs: sw.elapsedMilliseconds,
+        requestUrl: hasJs ? source.effectiveBaseUrl : null,
+        matchedPreview: '${parsed.length} categories',
+        logs: logs,
+      ),
+    );
+  }
+
+  @override
+  Future<({List<BookSearchItem> items, SourceDebugTrace trace})> explore(
+    ExploreCategory category, {
+    int page = 1,
+    CancellationToken? cancelToken,
+  }) async {
+    cancelToken?.throwIfCancelled();
+    final sw = Stopwatch()..start();
+
+    final rawExploreItemUrl = category.url.trim();
+    if (rawExploreItemUrl.isEmpty) {
+      throw SourceParseFailure(
+        message:
+            'ExploreCategory "${category.title}" has empty url (group headers cannot be explored directly)',
+        sourceId: providerId,
+        step: 'explore',
+      );
+    }
+
+    final exploreWebView =
+        source.ruleExplore.webView ||
+        (source.ruleExplore.isEmpty && source.ruleSearch.webView);
+    _ensureSupported(stepWebView: exploreWebView, stepName: 'explore');
+
+    final rules = _mergedExploreRules;
+    evaluator.guardUnsupportedRules(<String?>[
+      rawExploreItemUrl,
+      source.rawHeader,
+      source.jsLib,
+      rules.bookList,
+      rules.name,
+      rules.bookUrl,
+      rules.author,
+      rules.coverUrl,
+      rules.intro,
+      rules.lastChapter,
+      rules.kind,
+    ]);
+
+    if (source.normalizedBaseUrl.isEmpty) {
+      throw UnsupportedLegadoRuleFailure(
+        message:
+            'Legado source has non-HTTP or malformed bookSourceUrl: "${source.bookSourceUrl}"',
+        feature: 'malformed_base_url',
+        sourceId: providerId,
+      );
+    }
+
+    if (page == 1 && rules.bookList.trim().isEmpty) {
+      throw SourceParseFailure(
+        message: 'Legado ruleExplore.bookList is empty',
+        sourceId: providerId,
+        step: 'explore',
+        rule: rules.bookList,
+      );
+    }
+
+    _bookVars.clear();
+    _bookVariable = '';
+    _bookCustomVariable = '';
+    _bookName = '';
+    _bookUrl = '';
+    _tocUrl = '';
+    final session = _createSession();
+    try {
+      final baseHeaders = await evaluator.evaluateHeaders(
+        baseUrl: source.effectiveBaseUrl,
+        session: session,
+        cancelToken: cancelToken,
+      );
+
+      final req = await evaluator.parseUrlSpecAsync(
+        rawExploreItemUrl,
+        baseUrl: source.effectiveBaseUrl,
+        defaultHeaders: baseHeaders,
+        defaultCharset: source.charset,
+        page: page,
+        session: session,
+        cancelToken: cancelToken,
+      );
+      _ensureSupported(stepWebView: req.webView, stepName: 'exploreUrl');
+
+      final resp = await httpClient.request(
+        req.url,
+        method: req.method,
+        data: req.body,
+        headers: req.headers,
+        charsetOverride: req.charset,
+        rateLimitMs: effectiveRateLimitMs,
+        cancelToken: cancelToken,
+      );
+
+      final blocksRes = await evaluator.evaluateListBlocks(
+        resp.body,
+        rules.bookList,
+        baseUrl: resp.finalUrl,
+        session: session,
+        cancelToken: cancelToken,
+      );
+
+      if (blocksRes.items.isEmpty) {
+        if (page > 1) {
+          sw.stop();
+          return (
+            items: const <BookSearchItem>[],
+            trace: SourceDebugTrace(
+              step: 'explore',
+              elapsedMs: sw.elapsedMilliseconds,
+              httpStatus: resp.statusCode,
+              requestUrl: resp.finalUrl,
+              matchedPreview:
+                  '0 items (pagination end, charset=${resp.detectedCharset})',
+              logs: List<String>.unmodifiable(session.logs),
+            ),
+          );
+        }
+        throw SourceParseFailure(
+          message:
+              'Legado ruleExplore.bookList matched 0 elements (${rules.bookList})',
+          sourceId: providerId,
+          step: 'explore',
+          rule: rules.bookList,
+        );
+      }
+
+      final items = await _extractBookListItems(
+        blocks: blocksRes.items,
+        reversed: blocksRes.reversed,
+        rules: rules,
+        baseUrl: resp.finalUrl,
+        page: page,
+        session: session,
+        cancelToken: cancelToken,
+      );
+
+      sw.stop();
+      return (
+        items: items,
+        trace: SourceDebugTrace(
+          step: 'explore',
+          elapsedMs: sw.elapsedMilliseconds,
+          httpStatus: resp.statusCode,
+          requestUrl: resp.finalUrl,
+          matchedPreview: items.isEmpty
+              ? '0 items'
+              : '${items.length} items (charset=${resp.detectedCharset}, first=${items.first.title})',
+          logs: List<String>.unmodifiable(session.logs),
+        ),
+      );
+    } finally {
+      _syncSession(session);
+    }
+  }
+
+  _BookListRules get _searchRules => (
+    bookList: source.ruleSearch.bookList,
+    name: source.ruleSearch.name,
+    author: source.ruleSearch.author,
+    bookUrl: source.ruleSearch.bookUrl,
+    coverUrl: source.ruleSearch.coverUrl,
+    intro: source.ruleSearch.intro,
+    lastChapter: source.ruleSearch.lastChapter,
+    kind: source.ruleSearch.kind,
+  );
+
+  _BookListRules get _mergedExploreRules {
+    final e = source.ruleExplore;
+    final s = source.ruleSearch;
+    return (
+      bookList: _pickNonEmpty(e.bookList, s.bookList),
+      name: _pickNonEmpty(e.name, s.name),
+      author: _pickNonEmpty(e.author, s.author),
+      bookUrl: _pickNonEmpty(e.bookUrl, s.bookUrl),
+      coverUrl: _pickNonEmpty(e.coverUrl, s.coverUrl),
+      intro: _pickNonEmpty(e.intro, s.intro),
+      lastChapter: _pickNonEmpty(e.lastChapter, s.lastChapter),
+      kind: _pickNonEmpty(e.kind, s.kind),
+    );
+  }
+
+  static String _pickNonEmpty(String primary, String fallback) =>
+      primary.trim().isNotEmpty ? primary : fallback;
+
+  static String _wrapExploreJsRule(String raw) {
+    var working = raw.trim();
+    final tagRegex = RegExp(r'<js>[\s\S]*?</js>', caseSensitive: false);
+    final blockedRanges = tagRegex
+        .allMatches(working)
+        .map((m) => (m.start, m.end))
+        .toList(growable: false);
+
+    final atJsRegex = RegExp(r'@js:', caseSensitive: false);
+    for (final m in atJsRegex.allMatches(working)) {
+      final insideTag = blockedRanges.any(
+        (r) => m.start >= r.$1 && m.start < r.$2,
+      );
+      if (!insideTag) {
+        final before = working.substring(0, m.start).trim();
+        final jsBody = working.substring(m.end).trim();
+        working = '$before<js>$jsBody\n</js>';
+        break;
+      }
+    }
+    return '$working<js>"$_exploreRawJsPrefix" + (result == null ? "" : String(result))</js>';
+  }
+
+  Future<List<BookSearchItem>> _extractBookListItems({
+    required List<String> blocks,
+    required bool reversed,
+    required _BookListRules rules,
+    required String baseUrl,
+    required LegadoEvalSession session,
+    String? keyword,
+    int page = 1,
+    CancellationToken? cancelToken,
+  }) async {
+    final orderedBlocks = reversed
+        ? blocks.reversed.toList(growable: false)
+        : blocks;
+
+    final items = <BookSearchItem>[];
+    for (final block in orderedBlocks) {
+      cancelToken?.throwIfCancelled();
+
+      Future<String> evalField(String rule) {
+        if (rule.trim().isEmpty) return Future<String>.value('');
+        return evaluator.evaluateString(
+          block,
+          rule,
+          baseUrl: baseUrl,
+          keyword: keyword,
+          page: page,
+          session: session,
+          cancelToken: cancelToken,
+        );
+      }
+
+      final title = await evalField(rules.name);
+      final rawBookUrl = rules.bookUrl.trim().isEmpty
+          ? baseUrl
+          : await evalField(rules.bookUrl);
+      if (title.isEmpty || rawBookUrl.isEmpty) {
+        continue;
+      }
+
+      final author = await evalField(rules.author);
+      final rawCover = await evalField(rules.coverUrl);
+      final coverUrl =
+          rules.coverUrl.trim().isEmpty ? null : _resolveOptional(rawCover, baseUrl);
+      final intro = await evalField(rules.intro);
+      final lastChapter = await evalField(rules.lastChapter);
+      final rawKind = await evalField(rules.kind);
+      final kind =
+          rules.kind.trim().isEmpty ? null : _nullableTrimmed(rawKind);
+
+      items.add(
+        BookSearchItem(
+          sourceId: providerId,
+          providerType: type,
+          bookUrl: LegadoRuleEvaluator.resolveUrlSpec(rawBookUrl, baseUrl),
+          title: title,
+          author: author,
+          coverUrl: coverUrl,
+          intro: intro,
+          latestChapterTitle: lastChapter,
+          kind: kind,
+        ),
+      );
+    }
+    return items;
   }
 
   @override
