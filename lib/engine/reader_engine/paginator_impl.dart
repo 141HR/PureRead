@@ -11,6 +11,7 @@ import '../../domain/value_objects/pagination_config.dart';
 import 'anchor_mapper.dart';
 import 'chinese_typesetting.dart';
 import 'inline_image_marker.dart';
+import 'platform_font_resolver.dart';
 
 /// Immediate first-screen payload emitted around `priorityCharOffset` before
 /// full-chapter incremental pagination completes.
@@ -61,7 +62,8 @@ class IncrementalPaginationResult {
 class TextPainterMetricsCache {
   TextPainterMetricsCache(this.config)
       : _baseStyle = TextStyle(
-          fontFamily: _resolveFontFamily(config.fontFamily),
+          fontFamily: resolvePlatformFontFamily(config.fontFamily),
+          fontFamilyFallback: resolvePlatformFontFamilyFallback(),
           fontSize: config.fontSize,
           fontWeight: resolveFontWeight(config.fontWeightValue),
           height: config.lineHeightMultiplier,
@@ -92,13 +94,6 @@ class TextPainterMetricsCache {
       '${config.fontFamily}|${config.fontFilePath ?? ''}|${config.fontSize}|'
       '${config.fontWeightValue}|${config.lineHeightMultiplier}|'
       '${config.letterSpacing}';
-
-  static String? _resolveFontFamily(String fontFamily) {
-    if (fontFamily.isEmpty || fontFamily == 'system') {
-      return null;
-    }
-    return fontFamily;
-  }
 
   static FontWeight resolveFontWeight(int fontWeightValue) {
     return switch (fontWeightValue) {

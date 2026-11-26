@@ -4,11 +4,13 @@ import 'dart:math' as math;
 import 'dart:typed_data';
 import 'dart:ui' as ui;
 
+import 'package:flutter/foundation.dart' show listEquals;
 import 'package:flutter/rendering.dart';
 
 import '../../application/reader/epub_image_cache.dart';
 import '../../domain/domain.dart';
 import '../../engine/reader_engine/inline_image_marker.dart';
+import '../../engine/reader_engine/platform_font_resolver.dart';
 
 /// Hit-test payload returned by [ReaderPagePainter.hitTestImage] when a pointer
 /// tap intersects an inline EPUB illustration.
@@ -88,14 +90,13 @@ class ReaderPagePainter extends CustomPainter {
 
     _paintPaperGrain(canvas, size);
 
-    final effectiveFontFamily =
-        (config.fontFamily == 'system' || config.fontFamily.isEmpty)
-        ? null
-        : config.fontFamily;
+    final effectiveFontFamily = resolvePlatformFontFamily(config.fontFamily);
+    final effectiveFontFallback = resolvePlatformFontFamilyFallback();
     final regularWeight = _resolveFontWeight(config.fontWeightValue);
 
     final baseStyle = TextStyle(
       fontFamily: effectiveFontFamily,
+      fontFamilyFallback: effectiveFontFallback,
       fontSize: config.fontSize,
       fontWeight: regularWeight,
       height: config.lineHeightMultiplier,
@@ -110,6 +111,7 @@ class ReaderPagePainter extends CustomPainter {
         offset: const Offset(16, 8),
         maxWidth: math.max(40.0, size.width - 32),
         fontFamily: effectiveFontFamily,
+        fontFamilyFallback: effectiveFontFallback,
       );
     }
 
@@ -127,6 +129,7 @@ class ReaderPagePainter extends CustomPainter {
           Offset(leftOriginX, topY),
           baseStyle: baseStyle,
           effectiveFontFamily: effectiveFontFamily,
+          effectiveFontFallback: effectiveFontFallback,
         );
       }
 
@@ -146,6 +149,7 @@ class ReaderPagePainter extends CustomPainter {
           Offset(rightOriginX, topY),
           baseStyle: baseStyle,
           effectiveFontFamily: effectiveFontFamily,
+          effectiveFontFallback: effectiveFontFallback,
         );
       }
     } else if (leftPage != null) {
@@ -156,6 +160,7 @@ class ReaderPagePainter extends CustomPainter {
         Offset(originX, topY),
         baseStyle: baseStyle,
         effectiveFontFamily: effectiveFontFamily,
+        effectiveFontFallback: effectiveFontFallback,
       );
     }
 
@@ -166,6 +171,7 @@ class ReaderPagePainter extends CustomPainter {
         offset: Offset(16, math.max(0.0, size.height - 24)),
         maxWidth: math.max(40.0, size.width * 0.5 - 24),
         fontFamily: effectiveFontFamily,
+        fontFamilyFallback: effectiveFontFallback,
       );
     }
     if (footerRightText != null && footerRightText!.isNotEmpty) {
@@ -174,6 +180,7 @@ class ReaderPagePainter extends CustomPainter {
           text: footerRightText!,
           style: TextStyle(
             fontFamily: effectiveFontFamily,
+            fontFamilyFallback: effectiveFontFallback,
             fontSize: 12,
             color: secondaryTextColor,
           ),
@@ -362,6 +369,7 @@ class ReaderPagePainter extends CustomPainter {
     Offset origin, {
     required TextStyle baseStyle,
     required String? effectiveFontFamily,
+    required List<String>? effectiveFontFallback,
   }) {
     final hlStart = ttsHighlightStartOffset;
     final hlEnd = ttsHighlightEndOffset;
@@ -387,6 +395,7 @@ class ReaderPagePainter extends CustomPainter {
           line,
           imageRef,
           effectiveFontFamily: effectiveFontFamily,
+          effectiveFontFallback: effectiveFontFallback,
         );
         continue;
       }
@@ -407,6 +416,7 @@ class ReaderPagePainter extends CustomPainter {
           origin: Offset(origin.dx + line.x, origin.dy + line.y),
           style: lineStyle,
           fontFamily: effectiveFontFamily,
+          fontFamilyFallback: effectiveFontFallback,
         );
         continue;
       }
@@ -497,6 +507,7 @@ class ReaderPagePainter extends CustomPainter {
     LayoutLine line,
     InlineImageRef imageRef, {
     required String? effectiveFontFamily,
+    required List<String>? effectiveFontFallback,
   }) {
     final imageRect = computeImageRect(sliceOrigin: origin, line: line);
     final rrect = RRect.fromRectAndRadius(
@@ -562,6 +573,7 @@ class ReaderPagePainter extends CustomPainter {
           text: label,
           style: TextStyle(
             fontFamily: effectiveFontFamily,
+            fontFamilyFallback: effectiveFontFallback,
             fontSize: 12,
             color: secondaryTextColor.withAlpha(failed ? 200 : 165),
           ),
@@ -591,6 +603,7 @@ class ReaderPagePainter extends CustomPainter {
     required Offset origin,
     required TextStyle style,
     required String? fontFamily,
+    required List<String>? fontFamilyFallback,
   }) {
     var i = 0;
     final len = visibleText.length;
@@ -619,6 +632,7 @@ class ReaderPagePainter extends CustomPainter {
       final glyphPainter = _glyphCache.obtain(
         glyph: glyph,
         fontFamily: fontFamily,
+        fontFamilyFallback: fontFamilyFallback,
         fontSize: style.fontSize ?? config.fontSize,
         fontWeight: style.fontWeight ?? FontWeight.w400,
         height: style.height ?? config.lineHeightMultiplier,
@@ -700,12 +714,14 @@ class ReaderPagePainter extends CustomPainter {
     required Offset offset,
     required double maxWidth,
     required String? fontFamily,
+    required List<String>? fontFamilyFallback,
   }) {
     final tp = TextPainter(
       text: TextSpan(
         text: text,
         style: TextStyle(
           fontFamily: fontFamily,
+          fontFamilyFallback: fontFamilyFallback,
           fontSize: 12,
           color: secondaryTextColor,
         ),
@@ -902,6 +918,7 @@ class _GlyphKey {
   const _GlyphKey({
     required this.glyph,
     required this.fontFamily,
+    required this.fontFamilyFallback,
     required this.fontSize,
     required this.fontWeightValue,
     required this.height,
@@ -910,6 +927,7 @@ class _GlyphKey {
 
   final String glyph;
   final String? fontFamily;
+  final List<String>? fontFamilyFallback;
   final double fontSize;
   final int fontWeightValue;
   final double height;
@@ -922,6 +940,7 @@ class _GlyphKey {
           runtimeType == other.runtimeType &&
           glyph == other.glyph &&
           fontFamily == other.fontFamily &&
+          listEquals(fontFamilyFallback, other.fontFamilyFallback) &&
           fontSize == other.fontSize &&
           fontWeightValue == other.fontWeightValue &&
           height == other.height &&
@@ -931,6 +950,7 @@ class _GlyphKey {
   int get hashCode => Object.hash(
     glyph,
     fontFamily,
+    Object.hashAll(fontFamilyFallback ?? const <String>[]),
     fontSize,
     fontWeightValue,
     height,
@@ -946,6 +966,7 @@ class _GlyphPainterCache {
   TextPainter obtain({
     required String glyph,
     required String? fontFamily,
+    required List<String>? fontFamilyFallback,
     required double fontSize,
     required FontWeight fontWeight,
     required double height,
@@ -954,6 +975,7 @@ class _GlyphPainterCache {
     final key = _GlyphKey(
       glyph: glyph,
       fontFamily: fontFamily,
+      fontFamilyFallback: fontFamilyFallback,
       fontSize: fontSize,
       fontWeightValue: fontWeight.value,
       height: height,
@@ -970,6 +992,7 @@ class _GlyphPainterCache {
         text: glyph,
         style: TextStyle(
           fontFamily: fontFamily,
+          fontFamilyFallback: fontFamilyFallback,
           fontSize: fontSize,
           fontWeight: fontWeight,
           height: height,

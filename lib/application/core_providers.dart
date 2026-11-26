@@ -7,6 +7,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:path/path.dart' as p;
 
 import '../domain/domain.dart';
+import '../engine/reader_engine/platform_font_resolver.dart';
 import '../infrastructure/platform/method_channel_platform_bridge.dart';
 import '../infrastructure/platform/platform_bridge.dart';
 import 'reader/reader_theme_x.dart';
@@ -444,16 +445,15 @@ class _FallbackReaderPaginator implements ReaderPaginator {
       ];
     }
 
-    final fontFamily =
-        (config.fontFamily == 'system' || config.fontFamily.isEmpty)
-        ? null
-        : config.fontFamily;
+    final fontFamily = resolvePlatformFontFamily(config.fontFamily);
+    final fontFamilyFallback = resolvePlatformFontFamilyFallback();
     final fontWeight = FontWeight.values.firstWhere(
       (w) => w.value == config.fontWeightValue,
       orElse: () => FontWeight.w400,
     );
     final baseStyle = TextStyle(
       fontFamily: fontFamily,
+      fontFamilyFallback: fontFamilyFallback,
       fontSize: config.fontSize,
       fontWeight: fontWeight,
       height: config.lineHeightMultiplier,

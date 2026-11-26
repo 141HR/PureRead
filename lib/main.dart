@@ -79,7 +79,6 @@ class _BootstrapErrorApp extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    const seedColor = Color(0xFF4A6B53);
     final detail = switch (failure) {
       DatabaseFailure(:final backupSnapshotPath)
           when backupSnapshotPath != null && backupSnapshotPath.isNotEmpty =>
@@ -94,21 +93,8 @@ class _BootstrapErrorApp extends StatelessWidget {
       title: 'PureRead',
       debugShowCheckedModeBanner: false,
       themeMode: ThemeMode.system,
-      theme: ThemeData(
-        useMaterial3: true,
-        colorScheme: ColorScheme.fromSeed(
-          seedColor: seedColor,
-          brightness: Brightness.light,
-        ),
-        scaffoldBackgroundColor: const Color(0xFFF7F4EC),
-      ),
-      darkTheme: ThemeData(
-        useMaterial3: true,
-        colorScheme: ColorScheme.fromSeed(
-          seedColor: seedColor,
-          brightness: Brightness.dark,
-        ),
-      ),
+      theme: buildPureReadTheme(brightness: Brightness.light),
+      darkTheme: buildPureReadTheme(brightness: Brightness.dark),
       home: Scaffold(
         body: Center(
           child: SingleChildScrollView(
