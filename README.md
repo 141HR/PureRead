@@ -28,7 +28,7 @@
 - **自研中文排版与高刷翻页内核**：以 `charOffset` 字符偏移量为唯一进度锚点（缩放窗口、切换字号/双栏零丢字、零重字），支持行尾标点避头尾、中英数字混排微距、Windows 宽屏双栏与 CJK 字体回退优化、Android 仿真卷页与纸张纹理。
 - **双模式自动阅读**：支持 **平滑垂直滚动** 与 **定时自动翻页** 双模式切换，配套悬浮控制条随时调节速度与暂停恢复。
 - **Windows + Android 双端原生 TTS 听书**：统一 Dart `TtsEngine` 接口与智能分句控制器；Windows 端采用原生 COM SAPI 5 / OneCore，Android 端采用系统 TTS 前台服务与 `MediaSession` 锁屏/通知栏控播。
-- **统一书源与 QuickJS 安全沙箱**：支持轻量化 JS 插件书源与 Legado JSON 书源（纯 Dart AES/DES/SHA/HMAC、`org.jsoup` DOM 桥接与 `:regex` 规则），提供多源聚合搜索、一键换源、4 步可视化调试工作台、书源批量体检与去重、统一正文净化管道（`ContentSanitizer`）及书内全文关键字搜索。
+- **统一书源与 QuickJS 安全沙箱**：支持轻量化 JS 插件书源与 Legado JSON 书源（纯 Dart AES/DES/SHA/HMAC、`org.jsoup` DOM 桥接与 `:regex` 规则），提供在线书源「发现 / 排行榜」榜单浏览、多源聚合搜索、一键换源、4 步可视化调试工作台、书源批量体检与去重、统一正文净化管道（`ContentSanitizer`）及书内全文关键字搜索。
 - **完整单机备份与数据安全**：基于 Drift (SQLite WAL) 9 表持久化；数据库 Schema 升级前自动创建回滚快照；支持一键导出/导入 `.pureread.zip` 整库备份包（含书架、进度、书签、书源、净化规则、主题与自定义字体）。
 
 ---
@@ -53,6 +53,7 @@
 
 | 版本 | 里程碑要点 |
 | :---: | :--- |
+| **`v0.6.0`** | 在线书源「发现 / 排行榜」（Legado `exploreUrl`/`ruleExplore` 与 JS 插件双驱动、自适应三端浏览与网络封面展示）；开源协议切换为 MIT；完善社区治理与 CI/CD 自动化 |
 | **`v0.5.0`** | EPUB 内联插图提取/探测/分页/LRU 缓存与大图查看器；平滑垂直滚动 + 定时翻页双模式自动阅读；Windows COM SAPI 5/OneCore 与 Android 原生 TTS + `MediaSession` 控播；Windows CJK 混合字重回退修复 |
 | **`v0.4.0`** | Windows / Android 3A 应用图标；Android `split-per-abi` 分包与 GitHub Release 自动发布流水线；书内关键字搜索与片段跳转；书源批量体检/导入去重/失效清理；Legado 模板表达式与卷页边缘手势加固 |
 | **`v0.3.0`** | 本地 EPUB 2/3 解析；仿真卷页与纸张纹理；书架自定义分组；Legado AES/DES/SHA/HMAC 与 `org.jsoup` / `:regex` 兼容加固；R8/ProGuard 压缩包与 30 MiB 生产性能验证 |

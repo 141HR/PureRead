@@ -7,8 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-11-26
+
+### Added
+- **在线书源「发现 / 排行榜」全链路**：
+  - 领域层新增 `ExploreCategory`、`ExplorableBookProvider` 与 `ProviderCapabilities.supportsExplore` 能力声明。
+  - 书源引擎新增 `LegadoExploreRule` / `LegadoExploreParser`（支持 JSON 严格与宽松格式、`\n` / `&&` 分隔并保护 `{...}` 参数与引号、分组标题与裸 URL）及 `LegadoCompatProvider` / `JsPluginProvider` 发现与榜单分页能力（含 `ruleExplore -> ruleSearch` 回退、单分类 `<js>` URL 逐页求值与 `page > 1` 平滑翻页结束）。
+  - 应用层新增 `ExploreState`、`ExploreController` 与独立 `exploreBookDetailControllerProvider`（支持书源筛选排序、按源缓存分类、旧请求取消与分页 URL 去重）。
+  - 界面层从搜索页抽离可复用的 `OnlineBookDetailPane` 与 `OnlineBookCover`（支持网络封面加载与离线渐变兜底），在主导航接入「发现」（`/explore`）入口，提供桌面三栏/双栏与移动端下钻响应式布局及 `#1/#2/#3` 榜单角标。
+- **开源社区规范与自动化配置**：完善 `CONTRIBUTING.md`、`CODE_OF_CONDUCT.md`、`SECURITY.md`、`.github/ISSUE_TEMPLATE/` 表单模板、`PULL_REQUEST_TEMPLATE.md`、`release.yml`、`dependabot.yml`、`.editorconfig` 与 `.gitattributes`。
+
 ### Changed
-- 将项目开源协议由 GPL-3.0 变更为 MIT License。
+- 将项目开源协议由 GPL-3.0 变更为 **MIT License**（含 `LICENSE`、`pubspec.yaml`、Windows `Runner.rc`、应用内关于页及项目章程/PRD/ADR 文档）。
+- 升级 `cupertino_icons` 至 `2.0.0` 及 GitHub Actions（`actions/checkout@v7`、`actions/setup-java@v6`、`actions/upload-artifact@v7`、`actions/download-artifact@v8`、`softprops/action-gh-release@v3`），并为 CI 工作流补充最小权限与并发取消策略。
 
 ## [0.5.0] - 2026-11-26
 
@@ -51,7 +62,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Drift (SQLite WAL) 9 表持久化架构及数据库升级前自动快照备份。
   - QuickJS 沙箱运行时（`qjs`）与统一 `BookProvider`（`JsPluginProvider` / `LegadoCompatProvider`）、多源聚合搜索、一键换源、4 步可视化调试台、正文净化（`ContentSanitizer`）、静默预加载与 `.pureread.zip` 本地整库备份恢复。
 
-[unreleased]: https://github.com/141HR/PureRead/compare/v0.5.0...HEAD
+[unreleased]: https://github.com/141HR/PureRead/compare/v0.6.0...HEAD
+[0.6.0]: https://github.com/141HR/PureRead/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/141HR/PureRead/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/141HR/PureRead/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/141HR/PureRead/releases/tag/v0.3.0

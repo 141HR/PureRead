@@ -51,7 +51,7 @@ class DriftBackupRepository implements BackupRepository {
     this._db,
     this._pathResolver, {
     DatabaseBackupGuard? backupGuard,
-    this.appVersion = '0.5.0+5',
+    this.appVersion = '0.6.0+6',
     DateTime Function()? nowProvider,
   }) : _backupGuard =
            backupGuard ??

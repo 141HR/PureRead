@@ -40,7 +40,7 @@ body:
     attributes:
       label: 应用版本（App Version）
       description: 可在「设置与备份 -> 关于 PureRead」或 Release 文件名中查看
-      placeholder: 例如：v0.5.0+5
+      placeholder: 例如：v0.6.0+6
     validations:
       required: true
 
