@@ -301,13 +301,11 @@ class LegadoCompatProvider implements ExplorableBookProvider {
     }
 
     final rawExploreUrl = source.exploreUrl!.trim();
-    final lowerExplore = rawExploreUrl.toLowerCase();
-    final hasJs =
-        lowerExplore.contains('<js>') || lowerExplore.startsWith('@js:');
+    final hasTopLevelJs = _isTopLevelExploreJs(rawExploreUrl);
 
     var resolvedExploreSpec = rawExploreUrl;
     var logs = const <String>[];
-    if (hasJs) {
+    if (hasTopLevelJs) {
       evaluator.guardUnsupportedRules(<String?>[
         rawExploreUrl,
         source.rawHeader,
@@ -342,7 +340,7 @@ class LegadoCompatProvider implements ExplorableBookProvider {
       trace: SourceDebugTrace(
         step: 'explore_categories',
         elapsedMs: sw.elapsedMilliseconds,
-        requestUrl: hasJs ? source.effectiveBaseUrl : null,
+        requestUrl: hasTopLevelJs ? source.effectiveBaseUrl : null,
         matchedPreview: '${parsed.length} categories',
         logs: logs,
       ),
@@ -532,10 +530,25 @@ class LegadoCompatProvider implements ExplorableBookProvider {
   static String _pickNonEmpty(String primary, String fallback) =>
       primary.trim().isNotEmpty ? primary : fallback;
 
+  static final RegExp _jsTagBlockRegex = RegExp(
+    r'<js>[\s\S]*?</js>',
+    caseSensitive: false,
+  );
+
+  static bool _isTopLevelExploreJs(String rawExploreUrl) {
+    final trimmed = rawExploreUrl.trim();
+    if (trimmed.isEmpty) return false;
+    final lower = trimmed.toLowerCase();
+    if (lower.startsWith('@js:')) return true;
+    if (!lower.startsWith('<js>')) return false;
+    final withoutJsTags = trimmed.replaceAll(_jsTagBlockRegex, '').trim();
+    if (withoutJsTags.isEmpty) return true;
+    return withoutJsTags.toLowerCase().startsWith('@js:');
+  }
+
   static String _wrapExploreJsRule(String raw) {
     var working = raw.trim();
-    final tagRegex = RegExp(r'<js>[\s\S]*?</js>', caseSensitive: false);
-    final blockedRanges = tagRegex
+    final blockedRanges = _jsTagBlockRegex
         .allMatches(working)
         .map((m) => (m.start, m.end))
         .toList(growable: false);

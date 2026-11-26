@@ -647,5 +647,93 @@ Reader's Pick::/pick&&脚本::<js>if(a&&b){"/1"}else{"/2"}</js>
         throwsA(isA<CancelledFailure>()),
       );
     });
+
+    test('preserves per-category <js> URLs in mixed text and JSON exploreUrl and evaluates them per-page in explore()', () async {
+      final mixedTextProvider = LegadoCompatProvider(
+        providerId: 'mixed-per-category-js',
+        source: LegadoBookSource.fromJson(<String, Object?>{
+          'bookSourceName': 'MixedPerCategoryJs',
+          'bookSourceUrl': server.baseUrl,
+          'exploreUrl': '''
+榜单::
+静态::/rank/first
+脚本::<js>page > 1 ? "/rank/page_2" : "/rank/first"</js>
+''',
+          'ruleExplore': <String, Object?>{
+            'bookList': '.search-list > div',
+            'name': '.name@text',
+            'author': '.writer@text',
+            'bookUrl': '.name@href',
+          },
+        }),
+        httpClient: httpClient,
+        rateLimitMsOverride: 0,
+      );
+
+      final textCats = await mixedTextProvider.getExploreCategories();
+      expect(textCats.categories, hasLength(3));
+      expect(textCats.categories[0].isGroupHeader, isTrue);
+      expect(textCats.categories[1].url, '/rank/first');
+      expect(
+        textCats.categories[2].url,
+        '<js>page > 1 ? "/rank/page_2" : "/rank/first"</js>',
+      );
+
+      final staticRes = await mixedTextProvider.explore(
+        textCats.categories[1],
+        page: 1,
+      );
+      expect(staticRes.items.single.title, '首页直达');
+
+      final jsPage1 = await mixedTextProvider.explore(
+        textCats.categories[2],
+        page: 1,
+      );
+      expect(jsPage1.items.single.title, '首页直达');
+
+      final jsPage2 = await mixedTextProvider.explore(
+        textCats.categories[2],
+        page: 2,
+      );
+      expect(jsPage2.items.single.title, '第二页书目');
+
+      final jsonWithPerCatJsProvider = LegadoCompatProvider(
+        providerId: 'json-per-category-js',
+        source: LegadoBookSource.fromJson(<String, Object?>{
+          'bookSourceName': 'JsonPerCategoryJs',
+          'bookSourceUrl': server.baseUrl,
+          'exploreUrl': jsonEncode(<Map<String, Object?>>[
+            <String, Object?>{
+              'title': '动态页',
+              'url': '<js>page > 1 ? "/rank/page_2" : "/rank/first"</js>',
+            },
+            <String, Object?>{
+              'title': '静态页',
+              'url': '/rank/first',
+            },
+          ]),
+          'ruleExplore': <String, Object?>{
+            'bookList': '.search-list > div',
+            'name': '.name@text',
+            'author': '.writer@text',
+            'bookUrl': '.name@href',
+          },
+        }),
+        httpClient: httpClient,
+        rateLimitMsOverride: 0,
+      );
+
+      final jsonCats = await jsonWithPerCatJsProvider.getExploreCategories();
+      expect(jsonCats.categories, hasLength(2));
+      expect(
+        jsonCats.categories[0].url,
+        '<js>page > 1 ? "/rank/page_2" : "/rank/first"</js>',
+      );
+      final jsonDynamicP2 = await jsonWithPerCatJsProvider.explore(
+        jsonCats.categories[0],
+        page: 2,
+      );
+      expect(jsonDynamicP2.items.single.title, '第二页书目');
+    });
   });
 }
