@@ -25,6 +25,14 @@ class EpubXhtmlExtractor {
     'template',
   };
 
+  static const Set<String> _nonSvgIgnoredTags = <String>{
+    'script',
+    'style',
+    'head',
+    'noscript',
+    'template',
+  };
+
   static const Set<String> _blockTags = <String>{
     'p',
     'div',
@@ -204,11 +212,16 @@ class EpubXhtmlExtractor {
   /// When [fragment] is provided, extraction begins at the element matching
   /// `[id=fragment]` or `<a name=fragment>` and stops cleanly before the first
   /// element matching [stopFragment] or any entry in [stopFragments].
+  ///
+  /// When [onImage] is provided, `<img>` and `<svg>` descendant `<image>` tags
+  /// invoke [onImage] and any non-empty returned marker is emitted on its own
+  /// standalone line.
   static String extractText(
     Uint8List bytes, {
     String? fragment,
     String? stopFragment,
     List<String> stopFragments = const <String>[],
+    String? Function(String rawSrc, String alt)? onImage,
   }) {
     final htmlText = decodeBytesToString(bytes);
     return extractTextFromHtml(
@@ -216,6 +229,7 @@ class EpubXhtmlExtractor {
       fragment: fragment,
       stopFragment: stopFragment,
       stopFragments: stopFragments,
+      onImage: onImage,
     );
   }
 
@@ -225,6 +239,7 @@ class EpubXhtmlExtractor {
     String? fragment,
     String? stopFragment,
     List<String> stopFragments = const <String>[],
+    String? Function(String rawSrc, String alt)? onImage,
   }) {
     if (htmlText.trim().isEmpty) return '';
 
@@ -257,6 +272,7 @@ class EpubXhtmlExtractor {
       startElement: startElement,
       stopIds: stopIds,
       containerBoundStop: containerBoundStop,
+      onImage: onImage,
     );
     walker.walk(root);
     return walker.finish();
@@ -382,11 +398,13 @@ class _DomTextWalker {
     required this.startElement,
     required this.stopIds,
     required this.containerBoundStop,
+    this.onImage,
   }) : _capturing = startElement == null;
 
   final dom.Element? startElement;
   final Set<String> stopIds;
   final bool containerBoundStop;
+  final String? Function(String rawSrc, String alt)? onImage;
 
   bool _capturing;
   bool _stopped = false;
@@ -401,7 +419,11 @@ class _DomTextWalker {
 
     if (node is dom.Element) {
       final tag = (node.localName ?? '').toLowerCase();
-      if (EpubXhtmlExtractor._ignoredTags.contains(tag)) {
+      if (onImage == null) {
+        if (EpubXhtmlExtractor._ignoredTags.contains(tag)) {
+          return;
+        }
+      } else if (EpubXhtmlExtractor._nonSvgIgnoredTags.contains(tag)) {
         return;
       }
 
@@ -418,6 +440,32 @@ class _DomTextWalker {
       if (!_capturing && isStart) {
         _capturing = true;
         startedHere = true;
+      }
+
+      if (tag == 'svg') {
+        if (_capturing) {
+          _walkSvgForImages(node);
+        }
+        if (startedHere && containerBoundStop) {
+          _stopped = true;
+        }
+        return;
+      }
+
+      if (tag == 'img' && onImage != null) {
+        if (_capturing) {
+          final rawSrc = _extractHtmlImgSrc(node);
+          if (rawSrc != null && rawSrc.isNotEmpty) {
+            final alt = EpubXhtmlExtractor.normalizeInlineText(
+              node.attributes['alt'] ?? '',
+            );
+            _emitImage(rawSrc, alt);
+          }
+        }
+        if (isStart && containerBoundStop) {
+          _stopped = true;
+        }
+        return;
       }
 
       if (_capturing && EpubXhtmlExtractor._breakTags.contains(tag)) {
@@ -465,6 +513,79 @@ class _DomTextWalker {
     if (node is dom.Text && _capturing) {
       _appendText(node.data);
     }
+  }
+
+  void _walkSvgForImages(dom.Element svgParent) {
+    if (_stopped) return;
+    for (final child in svgParent.children) {
+      if (_stopped) break;
+      final tag = (child.localName ?? '').toLowerCase();
+      if (EpubXhtmlExtractor._nonSvgIgnoredTags.contains(tag)) {
+        continue;
+      }
+      if (stopIds.isNotEmpty &&
+          EpubXhtmlExtractor._elementMatchesAnyId(child, stopIds)) {
+        _flushLine();
+        _stopped = true;
+        return;
+      }
+      if (tag == 'image') {
+        final rawSrc = _extractSvgImageSrc(child);
+        if (rawSrc != null && rawSrc.isNotEmpty) {
+          final alt = EpubXhtmlExtractor.normalizeInlineText(
+            child.attributes['alt'] ??
+                child.attributes['aria-label'] ??
+                child.attributes['title'] ??
+                '',
+          );
+          _emitImage(rawSrc, alt);
+        }
+        continue;
+      }
+      _walkSvgForImages(child);
+    }
+  }
+
+  void _emitImage(String rawSrc, String alt) {
+    final callback = onImage;
+    if (callback == null) return;
+    final marker = callback(rawSrc, alt);
+    if (marker == null) return;
+    final cleanMarker = marker.trim();
+    if (cleanMarker.isEmpty) return;
+    _flushLine();
+    _lines.add(cleanMarker);
+    _pendingSpace = false;
+  }
+
+  static String? _extractHtmlImgSrc(dom.Element el) {
+    final src = el.attributes['src']?.trim() ?? '';
+    final dataSrc = el.attributes['data-src']?.trim() ?? '';
+    if (src.isNotEmpty) {
+      if (src.toLowerCase().startsWith('data:') &&
+          dataSrc.isNotEmpty &&
+          !dataSrc.toLowerCase().startsWith('data:')) {
+        return dataSrc;
+      }
+      return src;
+    }
+    return dataSrc.isEmpty ? null : dataSrc;
+  }
+
+  static String? _extractSvgImageSrc(dom.Element el) {
+    String? hrefFallback;
+    for (final entry in el.attributes.entries) {
+      final key = entry.key.toString().toLowerCase();
+      final val = entry.value.trim();
+      if (val.isEmpty) continue;
+      if (key == 'xlink:href') {
+        return val;
+      }
+      if (key == 'href') {
+        hrefFallback ??= val;
+      }
+    }
+    return hrefFallback;
   }
 
   void _appendText(String raw) {

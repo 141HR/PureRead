@@ -197,6 +197,32 @@ class LocalEpubProvider implements BookProvider {
     return text;
   }
 
+  /// Reads raw bytes for an embedded EPUB resource at [archivePath] inside the
+  /// EPUB file at [filePath].
+  ///
+  /// Returns `null` when [archivePath] is empty or not found in the archive.
+  Future<Uint8List?> readImageBytes({
+    required String filePath,
+    required String archivePath,
+    CancellationToken? cancelToken,
+  }) async {
+    cancelToken?.throwIfCancelled();
+    await _ensureReadableFile(filePath);
+    cancelToken?.throwIfCancelled();
+
+    final normalizedPath = EpubPathUtils.normalizeArchivePath(archivePath);
+    if (normalizedPath.isEmpty) {
+      return null;
+    }
+
+    final bytes = await _parser.readEntryBytesFromFile(
+      filePath: filePath,
+      archivePath: normalizedPath,
+    );
+    cancelToken?.throwIfCancelled();
+    return bytes;
+  }
+
   @override
   Future<({List<BookSearchItem> items, SourceDebugTrace trace})> search(
     String keyword, {

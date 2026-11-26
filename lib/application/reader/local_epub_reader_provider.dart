@@ -1,3 +1,5 @@
+import 'dart:typed_data';
+
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../domain/domain.dart';
@@ -11,6 +13,11 @@ typedef LocalEpubChapterReader =
       ChapterMeta chapter, {
       List<ChapterMeta>? chapters,
     });
+
+/// Gateway signature for reading raw bytes of an embedded EPUB resource (such as
+/// an inline illustration) identified by its normalized POSIX [archivePath].
+typedef LocalEpubImageReader =
+    Future<Uint8List?> Function(Book book, String archivePath);
 
 /// Provides the active [LocalEpubChapterReader] implementation.
 ///
@@ -27,4 +34,12 @@ final localEpubChapterReaderProvider = Provider<LocalEpubChapterReader>((ref) {
       filePath: book.localFilePath,
     );
   };
+});
+
+/// Provides the active [LocalEpubImageReader] implementation.
+///
+/// Overridden at app startup by `buildPureReadOverrides` with
+/// `LocalEpubProvider.readImageBytes`.
+final localEpubImageReaderProvider = Provider<LocalEpubImageReader>((ref) {
+  return (Book book, String archivePath) async => null;
 });

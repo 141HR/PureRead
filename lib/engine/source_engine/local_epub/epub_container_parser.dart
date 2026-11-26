@@ -9,6 +9,8 @@ import 'package:path/path.dart' as p;
 import 'package:xml/xml.dart';
 
 import '../../../domain/failures/app_failure.dart';
+import '../../reader_engine/inline_image_marker.dart';
+import 'epub_image_probe.dart';
 import 'epub_models.dart';
 import 'epub_path_utils.dart';
 import 'epub_xhtml_extractor.dart';
@@ -46,6 +48,20 @@ class EpubContainerParser {
         epubHref: epubHref,
         stopFragment: stopFragment,
         stopFragments: stopFragments,
+      ),
+    );
+  }
+
+  /// Reads raw bytes for a single archive entry [archivePath] from the EPUB
+  /// file at [filePath] inside a background [Isolate].
+  Future<Uint8List?> readEntryBytesFromFile({
+    required String filePath,
+    required String archivePath,
+  }) {
+    return Isolate.run(
+      () => readEntryBytesFromFileSync(
+        filePath: filePath,
+        archivePath: archivePath,
       ),
     );
   }
@@ -268,6 +284,110 @@ class EpubContainerParser {
     }
   }
 
+  /// Synchronous isolate-safe reader for a single archive entry [archivePath]
+  /// inside an EPUB file at [filePath].
+  static Uint8List? readEntryBytesFromFileSync({
+    required String filePath,
+    required String archivePath,
+  }) {
+    _ensureReadableFileSync(filePath);
+    if (archivePath.trim().isEmpty) return null;
+
+    InputFileStream? input;
+    Archive? archive;
+    try {
+      input = InputFileStream(filePath);
+      archive = ZipDecoder().decodeStream(input, verify: true);
+      final entry = _findEntryByArchivePath(archive, archivePath);
+      if (entry == null) return null;
+      return _readEntryBytesSafe(entry);
+    } on AppFailure {
+      rethrow;
+    } on FileSystemException catch (e, st) {
+      throw FileAccessFailure(
+        message: 'Failed to read EPUB file: ${e.message}',
+        filePath: filePath,
+        cause: e.toString(),
+        stackTrace: StackTrace.fromString(st.toString()),
+      );
+    } on ArchiveException catch (e, st) {
+      throw SourceParseFailure(
+        message: 'Corrupted EPUB ZIP while reading asset: ${e.message}',
+        step: 'content',
+        rule: archivePath,
+        cause: e.toString(),
+        stackTrace: StackTrace.fromString(st.toString()),
+      );
+    } on FormatException catch (e, st) {
+      throw SourceParseFailure(
+        message: 'Malformed EPUB asset payload: ${e.message}',
+        step: 'content',
+        rule: archivePath,
+        cause: e.toString(),
+        stackTrace: StackTrace.fromString(st.toString()),
+      );
+    } on RangeError catch (e, st) {
+      throw SourceParseFailure(
+        message: 'Corrupted EPUB ZIP asset entry: $e',
+        step: 'content',
+        rule: archivePath,
+        cause: e.toString(),
+        stackTrace: StackTrace.fromString(st.toString()),
+      );
+    } finally {
+      archive?.clearSync();
+      input?.closeSync();
+    }
+  }
+
+  /// Reads raw bytes for a single archive entry [archivePath] from in-memory
+  /// EPUB bytes.
+  static Uint8List? readEntryBytesFromBytes(
+    Uint8List epubBytes, {
+    required String archivePath,
+  }) {
+    if (archivePath.trim().isEmpty) return null;
+    if (epubBytes.isEmpty) {
+      throw const SourceParseFailure(
+        message: 'EPUB byte buffer is empty',
+        step: 'content',
+      );
+    }
+    Archive? archive;
+    try {
+      archive = ZipDecoder().decodeBytes(epubBytes, verify: true);
+      final entry = _findEntryByArchivePath(archive, archivePath);
+      if (entry == null) return null;
+      return _readEntryBytesSafe(entry);
+    } on AppFailure {
+      rethrow;
+    } on ArchiveException catch (e, st) {
+      throw SourceParseFailure(
+        message: 'Corrupted EPUB ZIP bytes while reading asset: ${e.message}',
+        step: 'content',
+        rule: archivePath,
+        cause: e.toString(),
+        stackTrace: StackTrace.fromString(st.toString()),
+      );
+    } finally {
+      archive?.clearSync();
+    }
+  }
+
+  static _IndexedArchiveEntry? _findEntryByArchivePath(
+    Archive archive,
+    String archivePath,
+  ) {
+    final trimmed = archivePath.trim();
+    if (trimmed.isEmpty) return null;
+    final index = _ArchiveIndex.fromArchive(archive);
+    final rawNorm = EpubPathUtils.normalizeArchivePath(trimmed);
+    final decodedNorm = EpubPathUtils.normalizeArchivePath(
+      EpubPathUtils.safeUrlDecode(trimmed),
+    );
+    return index.findAny(<String>[rawNorm, decodedNorm]);
+  }
+
   static void _ensureReadableFileSync(String filePath) {
     try {
       final type = FileSystemEntity.typeSync(filePath);
@@ -338,11 +458,51 @@ class EpubContainerParser {
     }
 
     final bytes = _readEntryBytes(entry);
+    final chapterPath = entry.normalizedPath;
+    final probedDimsCache = <String, ({int width, int height})?>{};
+
     return EpubXhtmlExtractor.extractText(
       bytes,
       fragment: split.fragment,
       stopFragment: stopFragment,
       stopFragments: stopFragments,
+      onImage: (rawSrc, alt) {
+        final trimmedSrc = rawSrc.trim();
+        if (trimmedSrc.isEmpty ||
+            trimmedSrc.startsWith('#') ||
+            _isExternalImageUri(trimmedSrc)) {
+          return null;
+        }
+        final resolved = EpubPathUtils.resolveHref(chapterPath, trimmedSrc);
+        final imgEntry = index.findAny(<String>[
+          resolved.archivePath,
+          resolved.rawArchivePath,
+        ]);
+        if (imgEntry == null) {
+          return null;
+        }
+        final imgPath = imgEntry.normalizedPath;
+        if (imgPath.toLowerCase().endsWith('.svg')) {
+          return null;
+        }
+        final ({int width, int height})? dims;
+        if (probedDimsCache.containsKey(imgPath)) {
+          dims = probedDimsCache[imgPath];
+        } else {
+          final imgBytes = _readEntryBytesSafe(imgEntry);
+          if (imgBytes == null || imgBytes.isEmpty) {
+            return null;
+          }
+          dims = EpubImageProbe.probeDimensions(imgBytes);
+          probedDimsCache[imgPath] = dims;
+        }
+        return InlineImageMarker.encode(
+          archivePath: imgPath,
+          width: dims?.width ?? 0,
+          height: dims?.height ?? 0,
+          alt: alt,
+        );
+      },
     );
   }
 
@@ -1309,6 +1469,17 @@ class EpubContainerParser {
         lower.startsWith('mailto:') ||
         lower.startsWith('javascript:') ||
         lower.startsWith('data:');
+  }
+
+  static bool _isExternalImageUri(String rawSrc) {
+    final lower = rawSrc.trim().toLowerCase();
+    return lower.startsWith('http:') ||
+        lower.startsWith('https:') ||
+        lower.startsWith('data:') ||
+        lower.startsWith('mailto:') ||
+        lower.startsWith('javascript:') ||
+        lower.startsWith('blob:') ||
+        lower.startsWith('about:');
   }
 
   static XmlElement? _findFirstElement(XmlElement parent, String localName) {

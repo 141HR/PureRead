@@ -10,6 +10,7 @@ import '../../domain/value_objects/page_slice.dart';
 import '../../domain/value_objects/pagination_config.dart';
 import 'anchor_mapper.dart';
 import 'chinese_typesetting.dart';
+import 'inline_image_marker.dart';
 
 /// Immediate first-screen payload emitted around `priorityCharOffset` before
 /// full-chapter incremental pagination completes.
@@ -780,6 +781,13 @@ class IncrementalTextPaginator implements ReaderPaginator {
       ];
     }
 
+    final imageRef = InlineImageMarker.tryParseLine(
+      text.substring(p.start, p.renderEnd),
+    );
+    if (imageRef != null) {
+      return _buildInlineImageLines(p, text, imageRef, config);
+    }
+
     metrics.warmUpSlice(text, p.start, p.renderEnd);
     final lineMetrics = p.isTitle && config.fontWeightValue != 700
         ? metricsFor(config.copyWith(fontWeightValue: 700))
@@ -881,6 +889,69 @@ class IncrementalTextPaginator implements ReaderPaginator {
     }
 
     return lines;
+  }
+
+  List<LayoutLine> _buildInlineImageLines(
+    _ParagraphRange p,
+    String text,
+    InlineImageRef imageRef,
+    PaginationConfig config,
+  ) {
+    const verticalPadding = 12.0;
+    final colW = math.max(1.0, config.columnWidth);
+    final colH = math.max(1.0, config.columnHeight);
+    final maxDrawH = math.max(1.0, colH - verticalPadding);
+
+    final double drawW;
+    final double drawH;
+    final isSmallIcon =
+        imageRef.width > 0 &&
+        imageRef.height > 0 &&
+        imageRef.width <= 160 &&
+        imageRef.height <= 120;
+
+    if (isSmallIcon) {
+      final naturalW = imageRef.width.toDouble();
+      final naturalH = imageRef.height.toDouble();
+      final scale = math.min(
+        1.0,
+        math.min(colW / naturalW, maxDrawH / naturalH),
+      );
+      drawW = naturalW * scale;
+      drawH = naturalH * scale;
+    } else {
+      final aspect = (imageRef.width > 0 && imageRef.height > 0)
+          ? imageRef.width / imageRef.height
+          : 4.0 / 3.0;
+      final maxIllustrationH = math.min(colH * 0.86, maxDrawH);
+      var w = colW;
+      var h = w / aspect;
+      if (h > maxIllustrationH) {
+        h = maxIllustrationH;
+        w = h * aspect;
+      }
+      drawW = w;
+      drawH = h;
+    }
+
+    final x = math.max(0.0, (colW - drawW) * 0.5);
+    final lineHeight = math.min(colH, drawH + verticalPadding);
+
+    return <LayoutLine>[
+      LayoutLine(
+        text: text.substring(p.start, p.end),
+        startCharOffset: p.start,
+        endCharOffset: p.end,
+        x: x,
+        y: 0.0,
+        width: drawW,
+        height: lineHeight,
+        isParagraphStart: true,
+        isParagraphEnd: true,
+        isChapterTitle: false,
+        charXOffsets: null,
+      ),
+    ];
   }
 
   _ScannedLine _scanLine({
