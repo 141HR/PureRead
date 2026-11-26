@@ -5,6 +5,7 @@ import 'package:flutter/painting.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../domain/domain.dart';
+import '../../engine/reader_engine/inline_image_marker.dart';
 import '../../infrastructure/platform/platform_bridge.dart';
 import '../bookshelf/local_epub_providers.dart';
 import '../core_providers.dart';
@@ -1113,6 +1114,74 @@ class ReaderSessionController extends Notifier<ReaderSessionState> {
     await flushProgress();
   }
 
+  /// Reads and sanitizes [chapterIndex] for TTS playback, reusing cached or
+  /// in-flight chapter loads and returning `null` if unavailable or disposed.
+  Future<String?> readChapterTextForTts(int chapterIndex) async {
+    if (!_isAlive || state.book == null) return null;
+    if (chapterIndex < 0 || chapterIndex >= state.chapters.length) {
+      return null;
+    }
+    if (chapterIndex == state.currentChapterIndex &&
+        state.currentChapterText.isNotEmpty) {
+      return state.currentChapterText;
+    }
+    try {
+      final text = await _getOrLoadChapterText(chapterIndex);
+      if (!_isAlive) return null;
+      return text;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  /// Jumps directly to a TTS speaking position at [chapterIndex] and
+  /// [charOffset] without polluting [ReaderSessionState.jumpUndoStack].
+  Future<void> jumpToTtsAnchor(int chapterIndex, int charOffset) async {
+    if (!_isAlive || state.chapters.isEmpty) return;
+    final targetChapter = chapterIndex.clamp(0, state.chapters.length - 1);
+    final safeOffset = math.max(0, charOffset);
+
+    if (targetChapter == state.currentChapterIndex &&
+        state.currentChapterText.isNotEmpty &&
+        state.currentPages.isNotEmpty &&
+        state.paginationConfig != null) {
+      final clampedOffset = safeOffset.clamp(
+        0,
+        state.currentChapterText.length - 1,
+      );
+      final pageIdx = findPageIndexByCharOffset(
+        state.currentPages,
+        clampedOffset,
+      );
+      final displayIdx = _alignPageIndex(pageIdx, state.columnCount);
+      if (displayIdx != state.currentPageIndex ||
+          clampedOffset != state.anchorOffset) {
+        _commit(
+          state.copyWith(
+            currentPageIndex: displayIdx,
+            anchorOffset: clampedOffset,
+          ),
+        );
+        _scheduleProgressSave();
+      }
+      return;
+    }
+
+    if (targetChapter == state.currentChapterIndex &&
+        state.currentChapterText.isNotEmpty) {
+      _chapterTextCache[targetChapter] ??= state.currentChapterText;
+    }
+
+    await _loadChapterAndPaginate(
+      chapterIndex: targetChapter,
+      targetCharOffset: safeOffset,
+      landAtEnd: false,
+      preserveAnchor: false,
+    );
+    if (!_isAlive) return;
+    await flushProgress();
+  }
+
   /// Activates a saved/built-in theme by [themeId] and repaginates preserving
   /// `anchorOffset`.
   Future<void> selectTheme(String themeId) async {
@@ -1510,7 +1579,43 @@ class ReaderSessionController extends Notifier<ReaderSessionState> {
 
   String _extractExcerpt(String text, int offset) {
     if (text.isEmpty) return '';
-    final start = offset.clamp(0, text.length - 1);
+    var start = offset.clamp(0, text.length - 1);
+    if (text.contains(InlineImageMarker.prefix)) {
+      final prevNl = text.lastIndexOf('\n', start);
+      final lineStart = prevNl < 0 ? 0 : prevNl + 1;
+      final nextNl = text.indexOf('\n', start);
+      final lineEnd = nextNl < 0 ? text.length : nextNl;
+      if (InlineImageMarker.isImageLine(text.substring(lineStart, lineEnd))) {
+        start = math.min(text.length, lineEnd + 1);
+        if (start >= text.length) return '';
+      }
+
+      var rawEnd = math.min(text.length, start + 48);
+      while (rawEnd < text.length) {
+        final endNl = text.indexOf('\n', rawEnd);
+        final lineCeiling = endNl < 0 ? text.length : endNl;
+        final curLineStart = rawEnd == 0
+            ? 0
+            : text.lastIndexOf('\n', rawEnd - 1) + 1;
+        final lineSlice = text.substring(curLineStart, lineCeiling);
+        if (!lineSlice.contains(InlineImageMarker.prefix)) {
+          rawEnd = lineCeiling;
+          break;
+        }
+        rawEnd = math.min(text.length, lineCeiling + 1 + 48);
+      }
+
+      final cleaned = InlineImageMarker.stripMarkers(
+        text.substring(start, rawEnd),
+      ).replaceAll('\n', ' ').trim();
+      if (cleaned.length <= 48) return cleaned;
+      var cut = 48;
+      final cu = cleaned.codeUnitAt(cut);
+      if (cu >= 0xDC00 && cu <= 0xDFFF) {
+        cut--;
+      }
+      return cleaned.substring(0, cut).trim();
+    }
     final end = math.min(text.length, start + 48);
     return text.substring(start, end).replaceAll('\n', ' ').trim();
   }

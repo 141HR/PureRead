@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:collection';
 import 'dart:math' as math;
 import 'dart:typed_data';
@@ -5,7 +6,13 @@ import 'dart:ui' as ui;
 
 import 'package:flutter/rendering.dart';
 
+import '../../application/reader/epub_image_cache.dart';
 import '../../domain/domain.dart';
+import '../../engine/reader_engine/inline_image_marker.dart';
+
+/// Hit-test payload returned by [ReaderPagePainter.hitTestImage] when a pointer
+/// tap intersects an inline EPUB illustration.
+typedef InlineImageHit = ({InlineImageRef ref, Rect rect});
 
 /// CustomPainter rendering one [PageSlice] (single-column) or a paired spread
 /// `(P_{2k}, P_{2k+1})` (two-column), with theme background, subtle procedural
@@ -27,7 +34,13 @@ class ReaderPagePainter extends CustomPainter {
     this.contentTopOffset = 0.0,
     this.enablePaperGrain = true,
     this.enableSpineShadow = true,
-  });
+    this.epubImageCache,
+    this.book,
+    this.ttsHighlightChapterIndex,
+    this.ttsHighlightStartOffset,
+    this.ttsHighlightEndOffset,
+    this.ttsHighlightColor,
+  }) : super(repaint: epubImageCache);
 
   final PaginationConfig config;
   final PageSlice? leftPage;
@@ -42,6 +55,12 @@ class ReaderPagePainter extends CustomPainter {
   final double contentTopOffset;
   final bool enablePaperGrain;
   final bool enableSpineShadow;
+  final EpubImageCache? epubImageCache;
+  final Book? book;
+  final int? ttsHighlightChapterIndex;
+  final int? ttsHighlightStartOffset;
+  final int? ttsHighlightEndOffset;
+  final Color? ttsHighlightColor;
 
   static final _GlyphPainterCache _glyphCache = _GlyphPainterCache();
   static final _PaperGrainBuffers _paperGrain = _PaperGrainBuffers.generate();
@@ -267,6 +286,76 @@ class ReaderPagePainter extends CustomPainter {
     );
   }
 
+  /// Computes the painted image bounds for an inline image [LayoutLine] inside
+  /// a slice positioned at [sliceOrigin].
+  static Rect computeImageRect({
+    required Offset sliceOrigin,
+    required LayoutLine line,
+  }) {
+    final vPad = line.height > 14.0 ? 6.0 : 0.0;
+    final drawH = math.max(1.0, line.height - vPad * 2);
+    return Rect.fromLTWH(
+      sliceOrigin.dx + line.x,
+      sliceOrigin.dy + line.y + vPad,
+      math.max(1.0, line.width),
+      drawH,
+    );
+  }
+
+  /// Pure geometric hit-test locating an inline EPUB image under
+  /// [localPosition] inside a canvas of [size].
+  static InlineImageHit? hitTestImage({
+    required Offset localPosition,
+    required Size size,
+    required PaginationConfig config,
+    required PageSlice? leftPage,
+    required PageSlice? rightPage,
+    double contentTopOffset = 0.0,
+  }) {
+    final topY = contentTopOffset;
+    if (config.columnCount == 2) {
+      final spreadWidth = config.columnWidth * 2 + config.columnGap;
+      final leftOriginX = math.max(0.0, (size.width - spreadWidth) / 2);
+      final rightOriginX = leftOriginX + config.columnWidth + config.columnGap;
+      if (leftPage != null) {
+        final hit = _hitTestSlice(
+          localPosition,
+          leftPage,
+          Offset(leftOriginX, topY),
+        );
+        if (hit != null) return hit;
+      }
+      if (rightPage != null) {
+        return _hitTestSlice(
+          localPosition,
+          rightPage,
+          Offset(rightOriginX, topY),
+        );
+      }
+      return null;
+    }
+
+    if (leftPage == null) return null;
+    final originX = math.max(0.0, (size.width - config.columnWidth) / 2);
+    return _hitTestSlice(localPosition, leftPage, Offset(originX, topY));
+  }
+
+  static InlineImageHit? _hitTestSlice(
+    Offset localPosition,
+    PageSlice slice,
+    Offset origin,
+  ) {
+    for (final line in slice.lines) {
+      final imageRef = InlineImageMarker.tryParseLine(line.text);
+      if (imageRef == null) continue;
+      final rect = computeImageRect(sliceOrigin: origin, line: line);
+      if (rect.contains(localPosition)) {
+        return (ref: imageRef, rect: rect);
+      }
+    }
+    return null;
+  }
+
   void _paintSlice(
     Canvas canvas,
     PageSlice slice,
@@ -274,7 +363,34 @@ class ReaderPagePainter extends CustomPainter {
     required TextStyle baseStyle,
     required String? effectiveFontFamily,
   }) {
+    final hlStart = ttsHighlightStartOffset;
+    final hlEnd = ttsHighlightEndOffset;
+    if (ttsHighlightChapterIndex == slice.chapterIndex &&
+        hlStart != null &&
+        hlEnd != null &&
+        hlStart < hlEnd) {
+      _paintTtsHighlights(
+        canvas,
+        slice,
+        origin,
+        highlightStart: hlStart,
+        highlightEnd: hlEnd,
+      );
+    }
+
     for (final line in slice.lines) {
+      final imageRef = InlineImageMarker.tryParseLine(line.text);
+      if (imageRef != null) {
+        _paintInlineImage(
+          canvas,
+          origin,
+          line,
+          imageRef,
+          effectiveFontFamily: effectiveFontFamily,
+        );
+        continue;
+      }
+
       final visibleText = trimTrailingLineBreaks(line.text);
       if (visibleText.isEmpty) continue;
 
@@ -304,6 +420,167 @@ class ReaderPagePainter extends CustomPainter {
         textDirection: TextDirection.ltr,
       )..layout();
       painter.paint(canvas, Offset(origin.dx + line.x, origin.dy + line.y));
+    }
+  }
+
+  void _paintTtsHighlights(
+    Canvas canvas,
+    PageSlice slice,
+    Offset origin, {
+    required int highlightStart,
+    required int highlightEnd,
+  }) {
+    final isDark = (backgroundColor?.computeLuminance() ?? 1.0) < 0.3;
+    final color =
+        ttsHighlightColor ??
+        (isDark ? const Color(0x4882B1FF) : const Color(0x384A6B53));
+    final highlightPaint = Paint()..color = color;
+
+    for (final line in slice.lines) {
+      if (InlineImageMarker.tryParseLine(line.text) != null) continue;
+      final visibleText = trimTrailingLineBreaks(line.text);
+      if (visibleText.isEmpty) continue;
+
+      final visStart = line.startCharOffset;
+      final visEnd = visStart + visibleText.length;
+      final overlapStart = math.max(visStart, highlightStart);
+      final overlapEnd = math.min(visEnd, highlightEnd);
+      if (overlapStart >= overlapEnd) continue;
+
+      final double leftX;
+      final double rightX;
+      final xOffsets = line.charXOffsets;
+      if (xOffsets != null && xOffsets.isNotEmpty) {
+        final localStart = overlapStart - visStart;
+        final localEnd = overlapEnd - visStart;
+        final startDx =
+            localStart < xOffsets.length ? xOffsets[localStart] : line.width;
+        final double endDx;
+        if (localEnd >= visibleText.length) {
+          endDx = math.max(startDx, line.width);
+        } else if (localEnd < xOffsets.length) {
+          var idx = localEnd;
+          while (idx < xOffsets.length && xOffsets[idx] <= startDx) {
+            idx++;
+          }
+          endDx = idx < xOffsets.length
+              ? xOffsets[idx]
+              : math.max(startDx, line.width);
+        } else {
+          endDx = math.max(startDx, line.width);
+        }
+        leftX = origin.dx + line.x + startDx;
+        rightX = origin.dx + line.x + endDx;
+      } else {
+        if (line.width <= 0.0) continue;
+        leftX = origin.dx + line.x;
+        rightX = origin.dx + line.x + line.width;
+      }
+
+      if (rightX <= leftX) continue;
+      final rect = Rect.fromLTRB(
+        leftX - 2.0,
+        origin.dy + line.y + 1.0,
+        rightX + 2.0,
+        origin.dy + line.y + math.max(2.0, line.height - 1.0),
+      );
+      canvas.drawRRect(
+        RRect.fromRectAndRadius(rect, const Radius.circular(4.0)),
+        highlightPaint,
+      );
+    }
+  }
+
+  void _paintInlineImage(
+    Canvas canvas,
+    Offset origin,
+    LayoutLine line,
+    InlineImageRef imageRef, {
+    required String? effectiveFontFamily,
+  }) {
+    final imageRect = computeImageRect(sliceOrigin: origin, line: line);
+    final rrect = RRect.fromRectAndRadius(
+      imageRect,
+      const Radius.circular(4.0),
+    );
+    final borderColor = (dividerColor ?? secondaryTextColor).withAlpha(56);
+    final borderPaint = Paint()
+      ..style = PaintingStyle.stroke
+      ..strokeWidth = 1.0
+      ..color = borderColor;
+
+    final cache = epubImageCache;
+    final currentBook = book;
+    ui.Image? decoded;
+    var failed = false;
+
+    if (cache != null && currentBook != null) {
+      decoded = cache.getCached(currentBook.id, imageRef.archivePath);
+      if (decoded == null) {
+        failed = cache.isFailed(currentBook.id, imageRef.archivePath);
+        if (!failed && !cache.isLoading(currentBook.id, imageRef.archivePath)) {
+          unawaited(cache.loadImage(currentBook, imageRef.archivePath));
+        }
+      }
+    }
+
+    if (decoded != null) {
+      canvas.save();
+      canvas.clipRRect(rrect);
+      paintImage(
+        canvas: canvas,
+        rect: imageRect,
+        image: decoded,
+        fit: BoxFit.contain,
+        filterQuality: FilterQuality.medium,
+      );
+      canvas.restore();
+      canvas.drawRRect(rrect, borderPaint);
+      return;
+    }
+
+    final bg = backgroundColor;
+    final isDark = (bg?.computeLuminance() ?? 1.0) < 0.3;
+    final fillColor = bg != null
+        ? Color.lerp(
+            bg,
+            isDark ? const Color(0xFFFFFFFF) : const Color(0xFF000000),
+            isDark ? 0.07 : 0.04,
+          )!
+        : const Color(0x14808080);
+
+    final fillPaint = Paint()..color = fillColor;
+    canvas.drawRRect(rrect, fillPaint);
+    canvas.drawRRect(rrect, borderPaint);
+
+    if (imageRect.width >= 40.0 && imageRect.height >= 26.0) {
+      final label = failed
+          ? '图片加载失败'
+          : (imageRef.alt.isNotEmpty ? imageRef.alt : '图片加载中…');
+      final tp = TextPainter(
+        text: TextSpan(
+          text: label,
+          style: TextStyle(
+            fontFamily: effectiveFontFamily,
+            fontSize: 12,
+            color: secondaryTextColor.withAlpha(failed ? 200 : 165),
+          ),
+        ),
+        textAlign: TextAlign.center,
+        textDirection: TextDirection.ltr,
+        maxLines: 2,
+        ellipsis: '…',
+      )..layout(maxWidth: math.max(16.0, imageRect.width - 16.0));
+      canvas.save();
+      canvas.clipRRect(rrect);
+      tp.paint(
+        canvas,
+        Offset(
+          imageRect.left + (imageRect.width - tp.width) * 0.5,
+          imageRect.top + (imageRect.height - tp.height) * 0.5,
+        ),
+      );
+      canvas.restore();
     }
   }
 
@@ -498,7 +775,13 @@ class ReaderPagePainter extends CustomPainter {
         oldDelegate.footerRightText != footerRightText ||
         oldDelegate.contentTopOffset != contentTopOffset ||
         oldDelegate.enablePaperGrain != enablePaperGrain ||
-        oldDelegate.enableSpineShadow != enableSpineShadow;
+        oldDelegate.enableSpineShadow != enableSpineShadow ||
+        oldDelegate.epubImageCache != epubImageCache ||
+        oldDelegate.book != book ||
+        oldDelegate.ttsHighlightChapterIndex != ttsHighlightChapterIndex ||
+        oldDelegate.ttsHighlightStartOffset != ttsHighlightStartOffset ||
+        oldDelegate.ttsHighlightEndOffset != ttsHighlightEndOffset ||
+        oldDelegate.ttsHighlightColor != ttsHighlightColor;
   }
 }
 

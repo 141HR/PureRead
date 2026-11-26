@@ -4,6 +4,7 @@ import 'dart:math' as math;
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../domain/domain.dart';
+import '../../engine/reader_engine/inline_image_marker.dart';
 import '../../infrastructure/storage/chapter_cache_store.dart';
 import '../core_providers.dart';
 import '../m2_providers.dart';
@@ -420,6 +421,7 @@ class InBookSearchService {
     required int contextAfter,
     CancellationToken? cancelToken,
   }) {
+    final markerSpans = _findMarkerLineSpans(text);
     final lowerText = text.toLowerCase();
     final lowerQuery = query.toLowerCase();
     final useFastPath =
@@ -429,12 +431,23 @@ class InBookSearchService {
       final qLen = lowerQuery.length;
       var pos = 0;
       var checks = 0;
+      var spanIdx = 0;
       while (pos <= lowerText.length - qLen) {
         if ((++checks & 63) == 0) {
           cancelToken?.throwIfCancelled();
         }
         final hitIdx = lowerText.indexOf(lowerQuery, pos);
         if (hitIdx < 0) break;
+        final hitEnd = hitIdx + qLen;
+        while (spanIdx < markerSpans.length &&
+            markerSpans[spanIdx].end <= hitIdx) {
+          spanIdx++;
+        }
+        if (spanIdx < markerSpans.length &&
+            markerSpans[spanIdx].overlaps(hitIdx, hitEnd)) {
+          pos = math.max(hitIdx + 1, markerSpans[spanIdx].end);
+          continue;
+        }
         if (out.length >= maxMatches) {
           return true;
         }
@@ -447,18 +460,28 @@ class InBookSearchService {
             matchLength: qLen,
             contextBefore: contextBefore,
             contextAfter: contextAfter,
+            markerSpans: markerSpans,
           ),
         );
-        pos = hitIdx + qLen;
+        pos = hitEnd;
       }
       return false;
     }
 
     final pattern = RegExp(RegExp.escape(query), caseSensitive: false);
     var checks = 0;
+    var spanIdx = 0;
     for (final match in pattern.allMatches(text)) {
       if ((++checks & 63) == 0) {
         cancelToken?.throwIfCancelled();
+      }
+      while (spanIdx < markerSpans.length &&
+          markerSpans[spanIdx].end <= match.start) {
+        spanIdx++;
+      }
+      if (spanIdx < markerSpans.length &&
+          markerSpans[spanIdx].overlaps(match.start, match.end)) {
+        continue;
       }
       if (out.length >= maxMatches) {
         return true;
@@ -472,6 +495,7 @@ class InBookSearchService {
           matchLength: match.end - match.start,
           contextBefore: contextBefore,
           contextAfter: contextAfter,
+          markerSpans: markerSpans,
         ),
       );
     }
@@ -486,51 +510,181 @@ class InBookSearchService {
     required int matchLength,
     required int contextBefore,
     required int contextAfter,
+    required List<_CharSpan> markerSpans,
   }) {
     final matchEnd = math.min<int>(text.length, charOffset + matchLength);
     final beforeCount = math.max<int>(0, contextBefore);
-    var sliceStart = math.max<int>(0, charOffset - beforeCount);
-    if (sliceStart > 0 &&
-        sliceStart < charOffset &&
-        _isLowSurrogate(text.codeUnitAt(sliceStart))) {
-      sliceStart--;
-    }
-
     final afterCount = math.max<int>(0, contextAfter);
-    var sliceEnd = math.min<int>(text.length, matchEnd + afterCount);
-    if (sliceEnd < text.length &&
-        sliceEnd > matchEnd &&
-        _isLowSurrogate(text.codeUnitAt(sliceEnd))) {
-      sliceEnd++;
+
+    if (markerSpans.isEmpty) {
+      var sliceStart = math.max<int>(0, charOffset - beforeCount);
+      if (sliceStart > 0 &&
+          sliceStart < charOffset &&
+          _isLowSurrogate(text.codeUnitAt(sliceStart))) {
+        sliceStart--;
+      }
+
+      var sliceEnd = math.min<int>(text.length, matchEnd + afterCount);
+      if (sliceEnd < text.length &&
+          sliceEnd > matchEnd &&
+          _isLowSurrogate(text.codeUnitAt(sliceEnd))) {
+        sliceEnd++;
+      }
+
+      final rawSlice = text
+          .substring(sliceStart, sliceEnd)
+          .replaceAll('\r', ' ')
+          .replaceAll('\n', ' ');
+
+      final localMatchStart = charOffset - sliceStart;
+      final localMatchEnd = localMatchStart + matchLength;
+
+      var trimLeft = 0;
+      while (trimLeft < localMatchStart &&
+          (rawSlice.codeUnitAt(trimLeft) == 0x20 ||
+              rawSlice.codeUnitAt(trimLeft) == 0x09)) {
+        trimLeft++;
+      }
+
+      var trimRight = rawSlice.length;
+      while (trimRight > localMatchEnd &&
+          (rawSlice.codeUnitAt(trimRight - 1) == 0x20 ||
+              rawSlice.codeUnitAt(trimRight - 1) == 0x09)) {
+        trimRight--;
+      }
+
+      final core = rawSlice.substring(trimLeft, trimRight);
+      final prefix = sliceStart > 0 ? '…' : '';
+      final suffix = sliceEnd < text.length ? '…' : '';
+      final snippet = '$prefix$core$suffix';
+      final matchStartInSnippet = prefix.length + (localMatchStart - trimLeft);
+
+      return InBookSearchMatch(
+        chapterIndex: chapterIndex,
+        chapterTitle: chapterTitle,
+        charOffset: charOffset,
+        matchLength: matchLength,
+        snippet: snippet,
+        matchStartInSnippet: matchStartInSnippet,
+      );
     }
 
-    final rawSlice = text
-        .substring(sliceStart, sliceEnd)
-        .replaceAll('\r', ' ')
-        .replaceAll('\n', ' ');
-
-    final localMatchStart = charOffset - sliceStart;
-    final localMatchEnd = localMatchStart + matchLength;
-
-    var trimLeft = 0;
-    while (trimLeft < localMatchStart &&
-        (rawSlice.codeUnitAt(trimLeft) == 0x20 ||
-            rawSlice.codeUnitAt(trimLeft) == 0x09)) {
-      trimLeft++;
+    var rawBeforeStart = charOffset;
+    var remainingBefore = beforeCount;
+    var bSpan = markerSpans.length - 1;
+    while (bSpan >= 0 && markerSpans[bSpan].start >= charOffset) {
+      bSpan--;
+    }
+    while (rawBeforeStart > 0 && remainingBefore > 0) {
+      if (bSpan >= 0 && rawBeforeStart <= markerSpans[bSpan].end) {
+        rawBeforeStart = math.min(rawBeforeStart, markerSpans[bSpan].start);
+        bSpan--;
+        continue;
+      }
+      final floor = bSpan >= 0 ? markerSpans[bSpan].end : 0;
+      final available = rawBeforeStart - floor;
+      final take = math.min(remainingBefore, available);
+      rawBeforeStart -= take;
+      remainingBefore -= take;
+    }
+    if (rawBeforeStart > 0 &&
+        rawBeforeStart < charOffset &&
+        _isLowSurrogate(text.codeUnitAt(rawBeforeStart))) {
+      rawBeforeStart--;
     }
 
-    var trimRight = rawSlice.length;
-    while (trimRight > localMatchEnd &&
-        (rawSlice.codeUnitAt(trimRight - 1) == 0x20 ||
-            rawSlice.codeUnitAt(trimRight - 1) == 0x09)) {
-      trimRight--;
+    var rawAfterEnd = matchEnd;
+    var remainingAfter = afterCount;
+    var aSpan = 0;
+    while (aSpan < markerSpans.length && markerSpans[aSpan].end <= matchEnd) {
+      aSpan++;
+    }
+    while (rawAfterEnd < text.length && remainingAfter > 0) {
+      if (aSpan < markerSpans.length &&
+          rawAfterEnd >= markerSpans[aSpan].start) {
+        rawAfterEnd = math.max(rawAfterEnd, markerSpans[aSpan].end);
+        aSpan++;
+        continue;
+      }
+      final ceiling =
+          aSpan < markerSpans.length ? markerSpans[aSpan].start : text.length;
+      final available = ceiling - rawAfterEnd;
+      final take = math.min(remainingAfter, available);
+      rawAfterEnd += take;
+      remainingAfter -= take;
+    }
+    if (rawAfterEnd < text.length &&
+        rawAfterEnd > matchEnd &&
+        _isLowSurrogate(text.codeUnitAt(rawAfterEnd))) {
+      rawAfterEnd++;
     }
 
-    final core = rawSlice.substring(trimLeft, trimRight);
-    final prefix = sliceStart > 0 ? '…' : '';
-    final suffix = sliceEnd < text.length ? '…' : '';
-    final snippet = '$prefix$core$suffix';
-    final matchStartInSnippet = prefix.length + (localMatchStart - trimLeft);
+    var cleanedBefore = '';
+    if (rawBeforeStart < charOffset) {
+      final rawBefore = text.substring(rawBeforeStart, charOffset);
+      final hadTrailingBreak =
+          rawBefore.endsWith('\n') || rawBefore.endsWith('\r');
+      var stripped = InlineImageMarker.stripMarkers(rawBefore);
+      if (hadTrailingBreak && stripped.isNotEmpty && !stripped.endsWith('\n')) {
+        stripped = '$stripped ';
+      }
+      cleanedBefore = stripped.replaceAll('\r', ' ').replaceAll('\n', ' ');
+      if (cleanedBefore.length > beforeCount) {
+        var cut = cleanedBefore.length - beforeCount;
+        if (_isLowSurrogate(cleanedBefore.codeUnitAt(cut))) {
+          cut--;
+        }
+        cleanedBefore = cleanedBefore.substring(cut);
+      }
+      var trimLeft = 0;
+      while (trimLeft < cleanedBefore.length &&
+          (cleanedBefore.codeUnitAt(trimLeft) == 0x20 ||
+              cleanedBefore.codeUnitAt(trimLeft) == 0x09)) {
+        trimLeft++;
+      }
+      if (trimLeft > 0) {
+        cleanedBefore = cleanedBefore.substring(trimLeft);
+      }
+    }
+
+    var cleanedAfter = '';
+    if (rawAfterEnd > matchEnd) {
+      final rawAfter = text.substring(matchEnd, rawAfterEnd);
+      final hadLeadingBreak =
+          rawAfter.startsWith('\n') || rawAfter.startsWith('\r');
+      var stripped = InlineImageMarker.stripMarkers(rawAfter);
+      if (hadLeadingBreak &&
+          stripped.isNotEmpty &&
+          !stripped.startsWith('\n')) {
+        stripped = ' $stripped';
+      }
+      cleanedAfter = stripped.replaceAll('\r', ' ').replaceAll('\n', ' ');
+      if (cleanedAfter.length > afterCount) {
+        var cut = afterCount;
+        if (_isLowSurrogate(cleanedAfter.codeUnitAt(cut))) {
+          cut++;
+        }
+        cleanedAfter = cleanedAfter.substring(
+          0,
+          math.min(cleanedAfter.length, cut),
+        );
+      }
+      var trimRight = cleanedAfter.length;
+      while (trimRight > 0 &&
+          (cleanedAfter.codeUnitAt(trimRight - 1) == 0x20 ||
+              cleanedAfter.codeUnitAt(trimRight - 1) == 0x09)) {
+        trimRight--;
+      }
+      if (trimRight < cleanedAfter.length) {
+        cleanedAfter = cleanedAfter.substring(0, trimRight);
+      }
+    }
+
+    final matchedChunk = text.substring(charOffset, matchEnd);
+    final prefix = rawBeforeStart > 0 ? '…' : '';
+    final suffix = rawAfterEnd < text.length ? '…' : '';
+    final snippet = '$prefix$cleanedBefore$matchedChunk$cleanedAfter$suffix';
+    final matchStartInSnippet = prefix.length + cleanedBefore.length;
 
     return InBookSearchMatch(
       chapterIndex: chapterIndex,
@@ -542,6 +696,42 @@ class InBookSearchService {
     );
   }
 
+  static List<_CharSpan> _findMarkerLineSpans(String text) {
+    if (!text.contains(InlineImageMarker.prefix)) {
+      return const <_CharSpan>[];
+    }
+    final spans = <_CharSpan>[];
+    final len = text.length;
+    var i = 0;
+    while (i < len) {
+      final lineStart = i;
+      while (i < len && text.codeUnitAt(i) != 0x0A) {
+        i++;
+      }
+      var renderEnd = i;
+      if (renderEnd > lineStart && text.codeUnitAt(renderEnd - 1) == 0x0D) {
+        renderEnd--;
+      }
+      if (i < len && text.codeUnitAt(i) == 0x0A) {
+        i++;
+      }
+      if (renderEnd > lineStart &&
+          InlineImageMarker.isImageLine(text.substring(lineStart, renderEnd))) {
+        spans.add(_CharSpan(lineStart, i));
+      }
+    }
+    return spans;
+  }
+
   static bool _isLowSurrogate(int codeUnit) =>
       codeUnit >= 0xDC00 && codeUnit <= 0xDFFF;
+}
+
+class _CharSpan {
+  const _CharSpan(this.start, this.end);
+
+  final int start;
+  final int end;
+
+  bool overlaps(int a, int b) => a < end && b > start;
 }

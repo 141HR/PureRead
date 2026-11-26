@@ -10,6 +10,7 @@ import '../application/bookshelf/local_epub_providers.dart';
 import '../application/core_providers.dart';
 import '../application/m2_providers.dart';
 import '../application/reader/local_epub_reader_provider.dart';
+import '../application/reader/tts_controller.dart';
 import '../domain/domain.dart';
 import '../engine/reader_engine/reader_engine.dart';
 import '../engine/source_engine/local_epub/local_epub.dart';
@@ -22,6 +23,7 @@ import '../infrastructure/network/source_http_client.dart';
 import '../infrastructure/platform/platform_bridge.dart';
 import '../infrastructure/storage/chapter_cache_store.dart';
 import '../infrastructure/storage/storage.dart';
+import '../infrastructure/tts/tts.dart';
 
 /// Viewport width breakpoint separating mobile bottom-tab layout from desktop
 /// side-rail layout.
@@ -276,6 +278,7 @@ List<Override> buildPureReadOverrides({
   LocalEpubProvider? localEpubProvider,
   FontStorageService? fontStorageService,
   PlatformBridge? platformBridge,
+  TtsEngine? ttsEngine,
   SourceHttpClient? sourceHttpClient,
   ChapterCacheStore? chapterCacheStore,
   BookProviderFactory? bookProviderFactory,
@@ -365,6 +368,18 @@ List<Override> buildPureReadOverrides({
         );
       };
     }),
+    localEpubImageReaderProvider.overrideWith((ref) {
+      return (Book book, String archivePath) async {
+        final path = book.localFilePath;
+        if (path == null || path.trim().isEmpty) {
+          return null;
+        }
+        return epubProvider.readImageBytes(
+          filePath: path,
+          archivePath: archivePath,
+        );
+      };
+    }),
     fontLoaderGatewayProvider.overrideWithValue(fontGateway),
     bookProviderFactoryProvider.overrideWith((ref) {
       final ownsHttpClient =
@@ -409,5 +424,6 @@ List<Override> buildPureReadOverrides({
     ),
     if (platformBridge != null)
       platformBridgeProvider.overrideWithValue(platformBridge),
+    if (ttsEngine != null) ttsEngineProvider.overrideWithValue(ttsEngine),
   ];
 }

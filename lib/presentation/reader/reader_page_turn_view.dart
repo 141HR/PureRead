@@ -3,13 +3,18 @@ import 'dart:math' as math;
 import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 
+import '../../application/reader/auto_read_state.dart';
+import '../../application/reader/epub_image_cache.dart';
 import '../../domain/domain.dart';
+import '../../engine/reader_engine/inline_image_marker.dart';
+import 'reader_auto_read_overlay.dart';
 import 'reader_page_painter.dart';
 import 'simulation_page_curl.dart';
 
 /// Renders paginated reader pages across `none`, `slide`, `cover`, `simulation`,
-/// and `scroll` page-turn modes, supporting tap zones, interactive drag with
-/// cancel spring-back, and throttled mouse-wheel paging.
+/// and `scroll` page-turn modes, supporting tap zones, inline EPUB image taps,
+/// TTS sentence highlights, optional Auto-Read overlay wrapping, interactive
+/// drag with cancel spring-back, and throttled mouse-wheel paging.
 class ReaderPageTurnView extends StatefulWidget {
   const ReaderPageTurnView({
     super.key,
@@ -29,6 +34,20 @@ class ReaderPageTurnView extends StatefulWidget {
     required this.onPrevPage,
     required this.onToggleOverlay,
     required this.onScrollOffsetChanged,
+    this.dividerColor,
+    this.epubImageCache,
+    this.book,
+    this.ttsHighlightChapterIndex,
+    this.ttsHighlightStartOffset,
+    this.ttsHighlightEndOffset,
+    this.ttsHighlightColor,
+    this.onTapImage,
+    this.autoReadState,
+    this.onAutoReadAdvance,
+    this.onAutoReadToggleControls,
+    this.onAutoReadReachedEnd,
+    this.nextChapterTitle,
+    this.autoReadAccentColor,
   });
 
   final PageTurnMode mode;
@@ -47,6 +66,20 @@ class ReaderPageTurnView extends StatefulWidget {
   final Future<void> Function() onPrevPage;
   final VoidCallback onToggleOverlay;
   final ValueChanged<int> onScrollOffsetChanged;
+  final Color? dividerColor;
+  final EpubImageCache? epubImageCache;
+  final Book? book;
+  final int? ttsHighlightChapterIndex;
+  final int? ttsHighlightStartOffset;
+  final int? ttsHighlightEndOffset;
+  final Color? ttsHighlightColor;
+  final ValueChanged<InlineImageRef>? onTapImage;
+  final AutoReadState? autoReadState;
+  final Future<void> Function()? onAutoReadAdvance;
+  final VoidCallback? onAutoReadToggleControls;
+  final VoidCallback? onAutoReadReachedEnd;
+  final String? nextChapterTitle;
+  final Color? autoReadAccentColor;
 
   @override
   State<ReaderPageTurnView> createState() => _ReaderPageTurnViewState();
@@ -101,6 +134,17 @@ class _ReaderPageTurnViewState extends State<ReaderPageTurnView>
     final pageChanged =
         oldWidget.currentPageIndex != widget.currentPageIndex ||
         oldWidget.currentChapterIndex != widget.currentChapterIndex;
+
+    final inCurtainAutoRead =
+        widget.autoReadState?.isActive == true &&
+        widget.autoReadState?.mode == AutoReadMode.curtain;
+    if (inCurtainAutoRead) {
+      _outgoingLeft = null;
+      _outgoingRight = null;
+      _externalAnimDirection = 0;
+      _pendingTurnHandled = false;
+      return;
+    }
 
     if (widget.mode == PageTurnMode.simulation) {
       if (pageChanged) {
@@ -171,55 +215,113 @@ class _ReaderPageTurnViewState extends State<ReaderPageTurnView>
 
   @override
   Widget build(BuildContext context) {
-    if (widget.mode == PageTurnMode.scroll) {
-      return _buildScrollMode(context);
-    }
-
     final currLeft = _sliceAt(widget.pages, widget.currentPageIndex);
     final currRight = widget.columnCount == 2
         ? _sliceAt(widget.pages, widget.currentPageIndex + 1)
         : null;
 
+    final autoRead = widget.autoReadState;
+    if (autoRead != null && autoRead.isActive) {
+      final isCurtain = autoRead.mode == AutoReadMode.curtain;
+      final Widget currentLayer = isCurtain
+          ? _paintCanvas(currLeft, currRight)
+          : _buildReadingBody(context, currLeft, currRight);
+      Widget? nextLayer;
+      if (isCurtain) {
+        final nextOffset = widget.currentPageIndex + widget.columnCount;
+        final nextLeft = _sliceAt(widget.pages, nextOffset);
+        final nextRight = widget.columnCount == 2
+            ? _sliceAt(widget.pages, nextOffset + 1)
+            : null;
+        if (nextLeft != null) {
+          nextLayer = _paintCanvas(nextLeft, nextRight);
+        } else if (widget.canGoNext) {
+          nextLayer = _buildNextChapterPreviewCard();
+        }
+      }
+
+      return ReaderAutoReadOverlay(
+        currentPageChild: currentLayer,
+        nextPageChild: nextLayer,
+        state: autoRead,
+        canGoNext: widget.canGoNext,
+        accentColor:
+            widget.autoReadAccentColor ?? Theme.of(context).colorScheme.primary,
+        dividerColor:
+            widget.dividerColor ?? widget.secondaryTextColor.withAlpha(70),
+        onAdvancePage: widget.onAutoReadAdvance ?? widget.onNextPage,
+        onToggleControls:
+            widget.onAutoReadToggleControls ?? widget.onToggleOverlay,
+        onReachedBookEnd: widget.onAutoReadReachedEnd,
+      );
+    }
+
+    return _buildReadingBody(context, currLeft, currRight);
+  }
+
+  Widget _buildReadingBody(
+    BuildContext context,
+    PageSlice? currLeft,
+    PageSlice? currRight,
+  ) {
+    if (widget.mode == PageTurnMode.scroll) {
+      return _buildScrollMode(context);
+    }
+
     if (widget.mode == PageTurnMode.simulation) {
       return Listener(
         onPointerSignal: _handlePointerSignal,
-        child: SimulationPageCurlView(
-          pageKey: ValueKey<String>(
-            '${widget.currentChapterIndex}:${widget.currentPageIndex}',
-          ),
-          currentChild: _paintCanvas(currLeft, currRight),
-          nextChildBuilder: () {
-            final nextOffset = widget.currentPageIndex + widget.columnCount;
-            final nextLeft = _sliceAt(widget.pages, nextOffset);
-            final nextRight = widget.columnCount == 2
-                ? _sliceAt(widget.pages, nextOffset + 1)
-                : null;
-            return _paintCanvas(nextLeft, nextRight);
-          },
-          prevChildBuilder: () {
-            final hasPrevInChapter = widget.currentPageIndex > 0;
-            final prevOffset = math.max(
-              0,
-              widget.currentPageIndex - widget.columnCount,
+        child: LayoutBuilder(
+          builder: (context, constraints) {
+            final viewportSize = Size(
+              math.max(1.0, constraints.maxWidth),
+              math.max(1.0, constraints.maxHeight),
             );
-            final prevLeft = hasPrevInChapter
-                ? _sliceAt(widget.pages, prevOffset)
-                : null;
-            final prevRight = (hasPrevInChapter && widget.columnCount == 2)
-                ? _sliceAt(widget.pages, prevOffset + 1)
-                : null;
-            return _paintCanvas(prevLeft, prevRight);
+            return SimulationPageCurlView(
+              pageKey: ValueKey<String>(
+                '${widget.currentChapterIndex}:${widget.currentPageIndex}',
+              ),
+              currentChild: _paintCanvas(currLeft, currRight),
+              nextChildBuilder: () {
+                final nextOffset = widget.currentPageIndex + widget.columnCount;
+                final nextLeft = _sliceAt(widget.pages, nextOffset);
+                final nextRight = widget.columnCount == 2
+                    ? _sliceAt(widget.pages, nextOffset + 1)
+                    : null;
+                return _paintCanvas(nextLeft, nextRight);
+              },
+              prevChildBuilder: () {
+                final hasPrevInChapter = widget.currentPageIndex > 0;
+                final prevOffset = math.max(
+                  0,
+                  widget.currentPageIndex - widget.columnCount,
+                );
+                final prevLeft = hasPrevInChapter
+                    ? _sliceAt(widget.pages, prevOffset)
+                    : null;
+                final prevRight = (hasPrevInChapter && widget.columnCount == 2)
+                    ? _sliceAt(widget.pages, prevOffset + 1)
+                    : null;
+                return _paintCanvas(prevLeft, prevRight);
+              },
+              canGoPrev: widget.canGoPrev,
+              canGoNext: widget.canGoNext,
+              paperColor: widget.backgroundColor,
+              showOverlay: widget.showOverlay,
+              onNextPage: widget.onNextPage,
+              onPrevPage: widget.onPrevPage,
+              onToggleOverlay: widget.onToggleOverlay,
+              onInterceptTap: widget.onTapImage == null
+                  ? null
+                  : (localPos) {
+                      if (widget.showOverlay) return false;
+                      return _tryHandleImageTap(localPos, viewportSize);
+                    },
+              lastTurnDirection: _lastSimulationForward
+                  ? CurlDirection.forward
+                  : CurlDirection.backward,
+            );
           },
-          canGoPrev: widget.canGoPrev,
-          canGoNext: widget.canGoNext,
-          paperColor: widget.backgroundColor,
-          showOverlay: widget.showOverlay,
-          onNextPage: widget.onNextPage,
-          onPrevPage: widget.onPrevPage,
-          onToggleOverlay: widget.onToggleOverlay,
-          lastTurnDirection: _lastSimulationForward
-              ? CurlDirection.forward
-              : CurlDirection.backward,
         ),
       );
     }
@@ -229,12 +331,14 @@ class _ReaderPageTurnViewState extends State<ReaderPageTurnView>
       child: LayoutBuilder(
         builder: (context, constraints) {
           final width = math.max(1.0, constraints.maxWidth);
+          final height = math.max(1.0, constraints.maxHeight);
+          final viewportSize = Size(width, height);
           return buildEdgeGuardedPageTurnDetector(
             context: context,
             viewportWidth: width,
             enableHorizontalDrag: _supportsHorizontalDrag,
             dragStartBehavior: DragStartBehavior.start,
-            onTapUp: (details) => _handleTapUp(details, width),
+            onTapUp: (details) => _handleTapUp(details, viewportSize),
             onHorizontalDragStart: _supportsHorizontalDrag
                 ? (details) => _onDragStart(details, width)
                 : null,
@@ -254,6 +358,50 @@ class _ReaderPageTurnViewState extends State<ReaderPageTurnView>
             ),
           );
         },
+      ),
+    );
+  }
+
+  Widget _buildNextChapterPreviewCard() {
+    final title = widget.nextChapterTitle?.trim() ?? '';
+    return ColoredBox(
+      color: widget.backgroundColor,
+      child: Center(
+        child: Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 28),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Icon(
+                Icons.menu_book_outlined,
+                size: 32,
+                color: widget.secondaryTextColor,
+              ),
+              const SizedBox(height: 12),
+              Text(
+                '即将进入下一章',
+                style: TextStyle(
+                  color: widget.secondaryTextColor,
+                  fontSize: 13,
+                ),
+              ),
+              if (title.isNotEmpty) ...[
+                const SizedBox(height: 8),
+                Text(
+                  title,
+                  textAlign: TextAlign.center,
+                  maxLines: 2,
+                  overflow: TextOverflow.ellipsis,
+                  style: TextStyle(
+                    color: widget.textColor,
+                    fontSize: 18,
+                    fontWeight: FontWeight.w600,
+                  ),
+                ),
+              ],
+            ],
+          ),
+        ),
       ),
     );
   }
@@ -388,6 +536,13 @@ class _ReaderPageTurnViewState extends State<ReaderPageTurnView>
         backgroundColor: widget.backgroundColor,
         textColor: widget.textColor,
         secondaryTextColor: widget.secondaryTextColor,
+        dividerColor: widget.dividerColor,
+        epubImageCache: widget.epubImageCache,
+        book: widget.book,
+        ttsHighlightChapterIndex: widget.ttsHighlightChapterIndex,
+        ttsHighlightStartOffset: widget.ttsHighlightStartOffset,
+        ttsHighlightEndOffset: widget.ttsHighlightEndOffset,
+        ttsHighlightColor: widget.ttsHighlightColor,
       ),
     );
   }
@@ -462,20 +617,62 @@ class _ReaderPageTurnViewState extends State<ReaderPageTurnView>
               }
 
               final slice = pages[index];
+              final scrollConfig = widget.config.copyWith(columnCount: 1);
               return Column(
                 mainAxisSize: MainAxisSize.min,
                 children: [
                   SizedBox(
                     height: widget.config.columnHeight,
                     width: double.infinity,
-                    child: CustomPaint(
-                      painter: ReaderPagePainter(
-                        config: widget.config.copyWith(columnCount: 1),
-                        leftPage: slice,
-                        backgroundColor: widget.backgroundColor,
-                        textColor: widget.textColor,
-                        secondaryTextColor: widget.secondaryTextColor,
-                      ),
+                    child: LayoutBuilder(
+                      builder: (itemContext, itemConstraints) {
+                        final itemSize = Size(
+                          math.max(1.0, itemConstraints.maxWidth),
+                          widget.config.columnHeight,
+                        );
+                        return GestureDetector(
+                          behavior: HitTestBehavior.opaque,
+                          onTapUp: (details) {
+                            if (widget.showOverlay) {
+                              widget.onToggleOverlay();
+                              return;
+                            }
+                            if (widget.onTapImage != null) {
+                              final hit = ReaderPagePainter.hitTestImage(
+                                localPosition: details.localPosition,
+                                size: itemSize,
+                                config: scrollConfig,
+                                leftPage: slice,
+                                rightPage: null,
+                              );
+                              if (hit != null) {
+                                widget.onTapImage!(hit.ref);
+                                return;
+                              }
+                            }
+                            widget.onToggleOverlay();
+                          },
+                          child: CustomPaint(
+                            painter: ReaderPagePainter(
+                              config: scrollConfig,
+                              leftPage: slice,
+                              backgroundColor: widget.backgroundColor,
+                              textColor: widget.textColor,
+                              secondaryTextColor: widget.secondaryTextColor,
+                              dividerColor: widget.dividerColor,
+                              epubImageCache: widget.epubImageCache,
+                              book: widget.book,
+                              ttsHighlightChapterIndex:
+                                  widget.ttsHighlightChapterIndex,
+                              ttsHighlightStartOffset:
+                                  widget.ttsHighlightStartOffset,
+                              ttsHighlightEndOffset:
+                                  widget.ttsHighlightEndOffset,
+                              ttsHighlightColor: widget.ttsHighlightColor,
+                            ),
+                          ),
+                        );
+                      },
                     ),
                   ),
                   Divider(
@@ -494,12 +691,35 @@ class _ReaderPageTurnViewState extends State<ReaderPageTurnView>
     );
   }
 
-  void _handleTapUp(TapUpDetails details, double width) {
+  bool _tryHandleImageTap(Offset localPosition, Size viewportSize) {
+    final onTapImage = widget.onTapImage;
+    if (onTapImage == null) return false;
+    final currLeft = _sliceAt(widget.pages, widget.currentPageIndex);
+    final currRight = widget.columnCount == 2
+        ? _sliceAt(widget.pages, widget.currentPageIndex + 1)
+        : null;
+    final hit = ReaderPagePainter.hitTestImage(
+      localPosition: localPosition,
+      size: viewportSize,
+      config: widget.config,
+      leftPage: currLeft,
+      rightPage: currRight,
+    );
+    if (hit == null) return false;
+    onTapImage(hit.ref);
+    return true;
+  }
+
+  void _handleTapUp(TapUpDetails details, Size viewportSize) {
     if (widget.showOverlay) {
       widget.onToggleOverlay();
       return;
     }
+    if (_tryHandleImageTap(details.localPosition, viewportSize)) {
+      return;
+    }
     final x = details.localPosition.dx;
+    final width = viewportSize.width;
     if (x < width * 0.30) {
       if (widget.canGoPrev) {
         widget.onPrevPage();

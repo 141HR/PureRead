@@ -676,6 +676,7 @@ class SimulationPageCurlView extends StatefulWidget {
     required this.onNextPage,
     required this.onPrevPage,
     required this.onToggleOverlay,
+    this.onInterceptTap,
     this.nextChildBuilder,
     this.prevChildBuilder,
     this.lastTurnDirection = CurlDirection.forward,
@@ -715,6 +716,11 @@ class SimulationPageCurlView extends StatefulWidget {
 
   /// Callback invoked when tapping the center zone or dismissing the overlay.
   final VoidCallback onToggleOverlay;
+
+  /// Optional tap interceptor evaluated before overlay/page-turn handling.
+  ///
+  /// Returning `true` consumes the tap without turning pages or toggling UI.
+  final bool Function(Offset localPosition)? onInterceptTap;
 
   /// Direction used for programmatic `didUpdateWidget` turns.
   final CurlDirection lastTurnDirection;
@@ -961,6 +967,9 @@ class _SimulationPageCurlViewState extends State<SimulationPageCurlView>
   }
 
   void _handleTapUp(TapUpDetails details, double width) {
+    if (widget.onInterceptTap?.call(details.localPosition) == true) {
+      return;
+    }
     if (widget.showOverlay) {
       widget.onToggleOverlay();
       return;
