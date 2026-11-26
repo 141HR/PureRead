@@ -7,10 +7,9 @@ import 'package:go_router/go_router.dart';
 import '../../app/providers.dart';
 import '../../app/router.dart';
 import '../../application/search/book_detail_controller.dart';
-import '../../application/search/book_detail_state.dart';
 import '../../application/search/search_controller.dart';
 import '../../application/search/search_state.dart';
-import 'change_source_sheet.dart';
+import 'online_book_detail_pane.dart';
 
 /// Adaptive multi-source aggregated search page.
 ///
@@ -112,11 +111,11 @@ class _SearchPageState extends ConsumerState<SearchPage> {
               ],
             ),
             body: isDesktop
-                ? _buildDesktopBody(searchState, detailState)
+                ? _buildDesktopBody(searchState)
                 : (showingMobileDetail
-                      ? _BookDetailPane(
-                          state: detailState,
+                      ? OnlineBookDetailPane(
                           onOpenReader: _openReader,
+                          emptyPlaceholderText: _emptyDetailPlaceholder,
                         )
                       : _buildSearchPane(searchState, isDesktop: false)),
           ),
@@ -125,10 +124,9 @@ class _SearchPageState extends ConsumerState<SearchPage> {
     );
   }
 
-  Widget _buildDesktopBody(
-    SearchState searchState,
-    BookDetailState detailState,
-  ) {
+  static const String _emptyDetailPlaceholder = '选择左侧任意书籍以预览详情与章节目录';
+
+  Widget _buildDesktopBody(SearchState searchState) {
     return Row(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
@@ -138,9 +136,9 @@ class _SearchPageState extends ConsumerState<SearchPage> {
         ),
         const VerticalDivider(width: 1),
         Expanded(
-          child: _BookDetailPane(
-            state: detailState,
+          child: OnlineBookDetailPane(
             onOpenReader: _openReader,
+            emptyPlaceholderText: _emptyDetailPlaceholder,
           ),
         ),
       ],
@@ -347,7 +345,7 @@ class _AggregatedSearchCard extends StatelessWidget {
           child: Row(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              _MiniBookCover(title: book.title),
+              OnlineBookCover(title: book.title, coverUrl: book.coverUrl),
               const SizedBox(width: 12),
               Expanded(
                 child: Column(
@@ -420,294 +418,6 @@ class _AggregatedSearchCard extends StatelessWidget {
               ),
             ],
           ),
-        ),
-      ),
-    );
-  }
-}
-
-class _BookDetailPane extends ConsumerWidget {
-  final BookDetailState state;
-  final Future<void> Function({int? initialChapterIndex}) onOpenReader;
-
-  const _BookDetailPane({
-    required this.state,
-    required this.onOpenReader,
-  });
-
-  @override
-  Widget build(BuildContext context, WidgetRef ref) {
-    final theme = Theme.of(context);
-    final book = state.aggregatedBook;
-    if (book == null) {
-      return Center(
-        child: Padding(
-          padding: const EdgeInsets.all(24),
-          child: Text(
-            '选择左侧任意书籍以预览详情与章节目录',
-            textAlign: TextAlign.center,
-            style: theme.textTheme.bodyLarge?.copyWith(
-              color: theme.colorScheme.onSurfaceVariant,
-            ),
-          ),
-        ),
-      );
-    }
-
-    final controller = ref.read(bookDetailControllerProvider.notifier);
-
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.stretch,
-      children: [
-        Padding(
-          padding: const EdgeInsets.all(16),
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Row(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  _MiniBookCover(title: state.displayTitle, large: true),
-                  const SizedBox(width: 14),
-                  Expanded(
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        Text(
-                          state.displayTitle,
-                          maxLines: 2,
-                          overflow: TextOverflow.ellipsis,
-                          style: theme.textTheme.titleLarge?.copyWith(
-                            fontWeight: FontWeight.w700,
-                          ),
-                        ),
-                        const SizedBox(height: 4),
-                        Text(
-                          state.displayAuthor.isEmpty
-                              ? '未知作者'
-                              : '作者：${state.displayAuthor}',
-                          maxLines: 1,
-                          overflow: TextOverflow.ellipsis,
-                          style: theme.textTheme.bodyMedium?.copyWith(
-                            color: theme.colorScheme.onSurfaceVariant,
-                          ),
-                        ),
-                        if (state.detail?.latestChapterTitle.isNotEmpty ??
-                            false) ...[
-                          const SizedBox(height: 4),
-                          Text(
-                            '最新章节：${state.detail!.latestChapterTitle}',
-                            maxLines: 1,
-                            overflow: TextOverflow.ellipsis,
-                            style: theme.textTheme.bodySmall?.copyWith(
-                              color: theme.colorScheme.primary,
-                            ),
-                          ),
-                        ],
-                      ],
-                    ),
-                  ),
-                ],
-              ),
-              if (state.displayIntro.isNotEmpty) ...[
-                const SizedBox(height: 12),
-                Text(
-                  state.displayIntro,
-                  maxLines: 4,
-                  overflow: TextOverflow.ellipsis,
-                  style: theme.textTheme.bodySmall?.copyWith(
-                    color: theme.colorScheme.onSurfaceVariant,
-                    height: 1.45,
-                  ),
-                ),
-              ],
-              const SizedBox(height: 12),
-              SingleChildScrollView(
-                scrollDirection: Axis.horizontal,
-                child: Row(
-                  children: [
-                    for (var i = 0; i < book.sources.length; i++)
-                      Padding(
-                        padding: const EdgeInsets.only(right: 8),
-                        child: ChoiceChip(
-                          label: Text(book.sources[i].sourceName),
-                          selected: state.selectedSourceIndex == i,
-                          onSelected: (_) {
-                            unawaited(controller.selectSourceIndex(i));
-                          },
-                        ),
-                      ),
-                  ],
-                ),
-              ),
-              const SizedBox(height: 12),
-              Wrap(
-                spacing: 10,
-                runSpacing: 8,
-                children: [
-                  FilledButton.tonalIcon(
-                    onPressed: state.isSavingToShelf
-                        ? null
-                        : () => unawaited(controller.addToBookshelf()),
-                    icon: Icon(
-                      state.isOnBookshelf
-                          ? Icons.bookmark_added
-                          : Icons.bookmark_add_outlined,
-                      size: 18,
-                    ),
-                    label: Text(state.isOnBookshelf ? '已在书架' : '加入书架'),
-                  ),
-                  FilledButton.icon(
-                    onPressed: state.isSavingToShelf
-                        ? null
-                        : () => unawaited(onOpenReader()),
-                    icon: const Icon(Icons.menu_book, size: 18),
-                    label: Text(state.isOnBookshelf ? '继续阅读' : '开始阅读'),
-                  ),
-                  if (state.existingBookshelfBook != null)
-                    OutlinedButton.icon(
-                      onPressed: () async {
-                        final currentBook = state.existingBookshelfBook!;
-                        final result = await ChangeSourceSheet.show(
-                          context,
-                          book: currentBook,
-                          currentChapterIndex: 0,
-                          currentChapterTitle: state.chapters.isNotEmpty
-                              ? state.chapters.first.title
-                              : currentBook.lastChapterTitle,
-                        );
-                        if (result != null && context.mounted) {
-                          await controller.reload();
-                        }
-                      },
-                      icon: const Icon(Icons.swap_horiz, size: 18),
-                      label: const Text('换源对比'),
-                    ),
-                  IconButton(
-                    tooltip: '刷新详情与目录',
-                    onPressed: () => unawaited(controller.reload()),
-                    icon: const Icon(Icons.refresh),
-                  ),
-                ],
-              ),
-            ],
-          ),
-        ),
-        if (state.statusMessage != null)
-          Material(
-            color: theme.colorScheme.secondaryContainer,
-            child: Padding(
-              padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
-              child: Text(
-                state.statusMessage!,
-                style: theme.textTheme.bodySmall?.copyWith(
-                  color: theme.colorScheme.onSecondaryContainer,
-                ),
-              ),
-            ),
-          ),
-        if (state.errorMessage != null)
-          Material(
-            color: theme.colorScheme.errorContainer,
-            child: Padding(
-              padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
-              child: Text(
-                state.errorMessage!,
-                style: theme.textTheme.bodySmall?.copyWith(
-                  color: theme.colorScheme.onErrorContainer,
-                ),
-              ),
-            ),
-          ),
-        const Divider(height: 1),
-        Padding(
-          padding: const EdgeInsets.fromLTRB(16, 10, 16, 6),
-          child: Row(
-            children: [
-              Text(
-                '目录预览 (${state.chapters.length} 章)',
-                style: theme.textTheme.titleSmall?.copyWith(
-                  fontWeight: FontWeight.w600,
-                ),
-              ),
-              if (state.isLoadingDetail || state.isLoadingToc) ...[
-                const SizedBox(width: 10),
-                const SizedBox(
-                  width: 14,
-                  height: 14,
-                  child: CircularProgressIndicator(strokeWidth: 2),
-                ),
-              ],
-            ],
-          ),
-        ),
-        Expanded(
-          child: state.chapters.isEmpty
-              ? Center(
-                  child: Text(
-                    state.isLoadingToc ? '正在加载章节目录...' : '暂无章节预览',
-                    style: theme.textTheme.bodySmall?.copyWith(
-                      color: theme.colorScheme.onSurfaceVariant,
-                    ),
-                  ),
-                )
-              : ListView.separated(
-                  padding: const EdgeInsets.symmetric(horizontal: 8),
-                  itemCount: state.chapters.length,
-                  separatorBuilder: (_, _) => const Divider(height: 1),
-                  itemBuilder: (context, index) {
-                    final chapter = state.chapters[index];
-                    return ListTile(
-                      dense: true,
-                      title: Text(
-                        chapter.title,
-                        maxLines: 1,
-                        overflow: TextOverflow.ellipsis,
-                      ),
-                      trailing: Text(
-                        '第 ${index + 1} 章',
-                        style: theme.textTheme.labelSmall?.copyWith(
-                          color: theme.colorScheme.onSurfaceVariant,
-                        ),
-                      ),
-                      onTap: () =>
-                          unawaited(onOpenReader(initialChapterIndex: index)),
-                    );
-                  },
-                ),
-        ),
-      ],
-    );
-  }
-}
-
-class _MiniBookCover extends StatelessWidget {
-  final String title;
-  final bool large;
-
-  const _MiniBookCover({required this.title, this.large = false});
-
-  @override
-  Widget build(BuildContext context) {
-    final firstChar = title.trim().isEmpty ? '书' : title.trim().substring(0, 1);
-    return Container(
-      width: large ? 72 : 52,
-      height: large ? 96 : 70,
-      decoration: BoxDecoration(
-        borderRadius: BorderRadius.circular(8),
-        gradient: const LinearGradient(
-          begin: Alignment.topLeft,
-          end: Alignment.bottomRight,
-          colors: <Color>[Color(0xFF4A6B53), Color(0xFF2D4433)],
-        ),
-      ),
-      alignment: Alignment.center,
-      child: Text(
-        firstChar,
-        style: TextStyle(
-          color: Colors.white,
-          fontWeight: FontWeight.bold,
-          fontSize: large ? 24 : 18,
         ),
       ),
     );
