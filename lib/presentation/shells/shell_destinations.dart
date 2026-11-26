@@ -21,6 +21,11 @@ const List<AppShellDestination> kPrimaryDestinations = [
     selectedIcon: Icons.menu_book,
   ),
   AppShellDestination(
+    label: '发现',
+    icon: Icons.explore_outlined,
+    selectedIcon: Icons.explore,
+  ),
+  AppShellDestination(
     label: '搜索',
     icon: Icons.search_outlined,
     selectedIcon: Icons.search,

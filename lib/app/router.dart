@@ -3,6 +3,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 
 import '../presentation/bookshelf/bookshelf_page.dart';
+import '../presentation/explore/explore_page.dart';
 import '../presentation/reader/reader_page.dart';
 import '../presentation/search/search_page.dart';
 import '../presentation/settings/settings_page.dart';
@@ -12,6 +13,7 @@ import '../presentation/sources/sources_page.dart';
 /// Named application route paths.
 abstract final class AppRoutes {
   static const bookshelf = '/bookshelf';
+  static const explore = '/explore';
   static const search = '/search';
   static const sources = '/sources';
   static const settings = '/settings';
@@ -39,6 +41,14 @@ final routerProvider = Provider<GoRouter>((ref) {
               GoRoute(
                 path: AppRoutes.bookshelf,
                 builder: (context, state) => const BookshelfPage(),
+              ),
+            ],
+          ),
+          StatefulShellBranch(
+            routes: [
+              GoRoute(
+                path: AppRoutes.explore,
+                builder: (context, state) => const ExplorePage(),
               ),
             ],
           ),
