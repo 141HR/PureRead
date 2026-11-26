@@ -135,10 +135,10 @@ class _ReaderPageTurnViewState extends State<ReaderPageTurnView>
         oldWidget.currentPageIndex != widget.currentPageIndex ||
         oldWidget.currentChapterIndex != widget.currentChapterIndex;
 
-    final inCurtainAutoRead =
+    final inScrollAutoRead =
         widget.autoReadState?.isActive == true &&
-        widget.autoReadState?.mode == AutoReadMode.curtain;
-    if (inCurtainAutoRead) {
+        widget.autoReadState?.mode == AutoReadMode.scroll;
+    if (inScrollAutoRead) {
       _outgoingLeft = null;
       _outgoingRight = null;
       _externalAnimDirection = 0;
@@ -222,12 +222,12 @@ class _ReaderPageTurnViewState extends State<ReaderPageTurnView>
 
     final autoRead = widget.autoReadState;
     if (autoRead != null && autoRead.isActive) {
-      final isCurtain = autoRead.mode == AutoReadMode.curtain;
-      final Widget currentLayer = isCurtain
+      final isScrollAuto = autoRead.mode == AutoReadMode.scroll;
+      final Widget currentLayer = isScrollAuto
           ? _paintCanvas(currLeft, currRight)
           : _buildReadingBody(context, currLeft, currRight);
       Widget? nextLayer;
-      if (isCurtain) {
+      if (isScrollAuto) {
         final nextOffset = widget.currentPageIndex + widget.columnCount;
         final nextLeft = _sliceAt(widget.pages, nextOffset);
         final nextRight = widget.columnCount == 2
@@ -253,6 +253,9 @@ class _ReaderPageTurnViewState extends State<ReaderPageTurnView>
         onToggleControls:
             widget.onAutoReadToggleControls ?? widget.onToggleOverlay,
         onReachedBookEnd: widget.onAutoReadReachedEnd,
+        pageKey: ValueKey<String>(
+          '${widget.currentChapterIndex}:${widget.currentPageIndex}',
+        ),
       );
     }
 

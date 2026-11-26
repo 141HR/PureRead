@@ -1,5 +1,4 @@
 import 'package:flutter/material.dart';
-import 'package:flutter/rendering.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:pureread/application/reader/auto_read_state.dart';
 import 'package:pureread/presentation/reader/reader_auto_read_bar.dart';
@@ -11,11 +10,9 @@ void _setOverlayViewport(WidgetTester tester) {
   addTearDown(tester.view.reset);
 }
 
-Rect _clipRectForKey(WidgetTester tester, String key) {
-  final renderClip = tester.renderObject<RenderClipRect>(
-    find.byKey(ValueKey<String>(key)),
-  );
-  return renderClip.clipper!.getClip(renderClip.size);
+double _translationYForKey(WidgetTester tester, String key) {
+  final transform = tester.widget<Transform>(find.byKey(ValueKey<String>(key)));
+  return transform.transform.getTranslation().y;
 }
 
 Widget _wrapOverlay({
@@ -26,6 +23,7 @@ Widget _wrapOverlay({
   VoidCallback? onReachedBookEnd,
   Widget? currentPageChild,
   Widget? nextPageChild,
+  Object? pageKey,
 }) {
   return MaterialApp(
     home: Scaffold(
@@ -48,6 +46,7 @@ Widget _wrapOverlay({
           onAdvancePage: onAdvancePage,
           onToggleControls: onToggleControls,
           onReachedBookEnd: onReachedBookEnd,
+          pageKey: pageKey,
         ),
       ),
     ),
@@ -56,7 +55,7 @@ Widget _wrapOverlay({
 
 void main() {
   group('ReaderAutoReadOverlay', () {
-    testWidgets('curtain mode clips top nextPage and bottom currentPage and advances cleanly', (
+    testWidgets('scroll mode translates current upward and next from bottom seamlessly', (
       tester,
     ) async {
       _setOverlayViewport(tester);
@@ -66,9 +65,9 @@ void main() {
       await tester.pumpWidget(
         _wrapOverlay(
           state: const AutoReadState(
-            mode: AutoReadMode.curtain,
+            mode: AutoReadMode.scroll,
             status: AutoReadStatus.running,
-            curtainSeconds: 10,
+            scrollSeconds: 10,
           ),
           canGoNext: true,
           nextPageChild: const ColoredBox(
@@ -85,27 +84,30 @@ void main() {
 
       expect(
         find.byKey(const ValueKey<String>('auto_read_curtain_scan_line')),
+        findsNothing,
+      );
+      expect(
+        find.byKey(const ValueKey<String>('auto_read_scroll_page_seam')),
         findsOneWidget,
       );
       expect(
-        _clipRectForKey(tester, 'auto_read_curtain_next_clip'),
-        const Rect.fromLTWH(0, 0, 400, 0),
+        _translationYForKey(tester, 'auto_read_scroll_current_page'),
+        closeTo(0.0, 0.5),
       );
       expect(
-        _clipRectForKey(tester, 'auto_read_curtain_current_clip'),
-        const Rect.fromLTWH(0, 0, 400, 800),
+        _translationYForKey(tester, 'auto_read_scroll_next_page'),
+        closeTo(800.0, 0.5),
       );
 
       await tester.pump(const Duration(seconds: 5));
-      final topClipHalf = _clipRectForKey(tester, 'auto_read_curtain_next_clip');
-      final bottomClipHalf = _clipRectForKey(
-        tester,
-        'auto_read_curtain_current_clip',
+      expect(
+        _translationYForKey(tester, 'auto_read_scroll_current_page'),
+        closeTo(-400.0, 2.0),
       );
-      expect(topClipHalf.top, 0.0);
-      expect(topClipHalf.height, closeTo(400.0, 2.0));
-      expect(bottomClipHalf.top, closeTo(400.0, 2.0));
-      expect(bottomClipHalf.height, closeTo(400.0, 2.0));
+      expect(
+        _translationYForKey(tester, 'auto_read_scroll_next_page'),
+        closeTo(400.0, 2.0),
+      );
       expect(advances, 0);
 
       // Single-tap toggles controls.
@@ -113,31 +115,37 @@ void main() {
       await tester.pump();
       expect(toggleCalls, 1);
 
-      // Complete first sweep -> calls onAdvancePage and restarts from 0.0.
+      // Complete first scroll cycle -> calls onAdvancePage and restarts from 0.0.
       await tester.pump(const Duration(seconds: 5, milliseconds: 16));
       await tester.pump();
       expect(advances, 1);
 
-      // Halfway through the next page sweep.
+      // Halfway through the next page scroll.
       await tester.pump(const Duration(seconds: 5));
-      final secondHalf = _clipRectForKey(tester, 'auto_read_curtain_next_clip');
-      expect(secondHalf.height, closeTo(400.0, 4.0));
+      expect(
+        _translationYForKey(tester, 'auto_read_scroll_current_page'),
+        closeTo(-400.0, 4.0),
+      );
+      expect(
+        _translationYForKey(tester, 'auto_read_scroll_next_page'),
+        closeTo(400.0, 4.0),
+      );
 
       await tester.pump(const Duration(seconds: 5, milliseconds: 16));
       await tester.pump();
       expect(advances, 2);
     });
 
-    testWidgets('curtain mode safely falls back when nextPageChild is null', (
+    testWidgets('scroll mode safely falls back when nextPageChild is null', (
       tester,
     ) async {
       _setOverlayViewport(tester);
       await tester.pumpWidget(
         _wrapOverlay(
           state: const AutoReadState(
-            mode: AutoReadMode.curtain,
+            mode: AutoReadMode.scroll,
             status: AutoReadStatus.running,
-            curtainSeconds: 8,
+            scrollSeconds: 8,
           ),
           canGoNext: true,
           nextPageChild: null,
@@ -149,9 +157,52 @@ void main() {
       await tester.pump(const Duration(seconds: 4));
       expect(tester.takeException(), isNull);
       expect(
-        _clipRectForKey(tester, 'auto_read_curtain_next_clip').height,
+        _translationYForKey(tester, 'auto_read_scroll_next_page'),
         closeTo(400.0, 2.0),
       );
+    });
+
+    testWidgets('scroll mode supports manual vertical drag scrubbing and resumes cleanly', (
+      tester,
+    ) async {
+      _setOverlayViewport(tester);
+      var advances = 0;
+
+      await tester.pumpWidget(
+        _wrapOverlay(
+          state: const AutoReadState(
+            mode: AutoReadMode.scroll,
+            status: AutoReadStatus.running,
+            scrollSeconds: 10,
+          ),
+          canGoNext: true,
+          nextPageChild: const ColoredBox(
+            key: ValueKey<String>('next_page'),
+            color: Color(0xFFEFECE4),
+            child: Center(child: Text('下一页正文')),
+          ),
+          onAdvancePage: () async {
+            advances++;
+          },
+          onToggleControls: () {},
+        ),
+      );
+
+      // Drag upward by 400px (delta.dy = -400) -> progress jumps by ~0.5.
+      await tester.drag(
+        find.byType(ReaderAutoReadOverlay),
+        const Offset(0, -400),
+      );
+      await tester.pump();
+
+      final midY = _translationYForKey(tester, 'auto_read_scroll_next_page');
+      expect(midY, lessThan(600.0));
+      expect(advances, 0);
+
+      // Resumes forward from the scrubbed offset and finishes within 6s.
+      await tester.pump(const Duration(seconds: 6));
+      await tester.pump();
+      expect(advances, 1);
     });
 
     testWidgets('timedTurn mode shows unobstructed currentPage with 2.5px bottom progress and turns on completion', (
@@ -181,7 +232,7 @@ void main() {
 
       expect(find.byKey(const ValueKey<String>('next_page')), findsNothing);
       expect(
-        find.byKey(const ValueKey<String>('auto_read_curtain_scan_line')),
+        find.byKey(const ValueKey<String>('auto_read_scroll_page_seam')),
         findsNothing,
       );
 
@@ -222,14 +273,14 @@ void main() {
       _setOverlayViewport(tester);
       var advances = 0;
       const runningState = AutoReadState(
-        mode: AutoReadMode.curtain,
+        mode: AutoReadMode.scroll,
         status: AutoReadStatus.running,
-        curtainSeconds: 10,
+        scrollSeconds: 10,
       );
       const pausedState = AutoReadState(
-        mode: AutoReadMode.curtain,
+        mode: AutoReadMode.scroll,
         status: AutoReadStatus.paused,
-        curtainSeconds: 10,
+        scrollSeconds: 10,
       );
 
       await tester.pumpWidget(
@@ -244,11 +295,11 @@ void main() {
       );
 
       await tester.pump(const Duration(seconds: 4));
-      final pausedHeight = _clipRectForKey(
+      final pausedOffset = _translationYForKey(
         tester,
-        'auto_read_curtain_next_clip',
-      ).height;
-      expect(pausedHeight, closeTo(320.0, 2.0));
+        'auto_read_scroll_current_page',
+      );
+      expect(pausedOffset, closeTo(-320.0, 2.0));
 
       // Pause and let significant time elapse -> frozen in place.
       await tester.pumpWidget(
@@ -263,8 +314,8 @@ void main() {
       );
       await tester.pump(const Duration(seconds: 12));
       expect(
-        _clipRectForKey(tester, 'auto_read_curtain_next_clip').height,
-        closeTo(pausedHeight, 0.5),
+        _translationYForKey(tester, 'auto_read_scroll_current_page'),
+        closeTo(pausedOffset, 0.5),
       );
       expect(advances, 0);
 
@@ -282,8 +333,8 @@ void main() {
       await tester.pump(const Duration(seconds: 5));
       expect(advances, 0);
       expect(
-        _clipRectForKey(tester, 'auto_read_curtain_next_clip').height,
-        closeTo(720.0, 4.0),
+        _translationYForKey(tester, 'auto_read_scroll_current_page'),
+        closeTo(-720.0, 4.0),
       );
 
       await tester.pump(const Duration(seconds: 1, milliseconds: 16));
@@ -300,9 +351,9 @@ void main() {
       await tester.pumpWidget(
         _wrapOverlay(
           state: const AutoReadState(
-            mode: AutoReadMode.curtain,
+            mode: AutoReadMode.scroll,
             status: AutoReadStatus.running,
-            curtainSeconds: 20,
+            scrollSeconds: 20,
           ),
           canGoNext: true,
           onAdvancePage: () async {
@@ -312,20 +363,20 @@ void main() {
         ),
       );
 
-      // Advance 5s out of 20s => p = 0.25 (y = 200).
+      // Advance 5s out of 20s => p = 0.25 (offsetY = 200).
       await tester.pump(const Duration(seconds: 5));
       expect(
-        _clipRectForKey(tester, 'auto_read_curtain_next_clip').height,
-        closeTo(200.0, 2.0),
+        _translationYForKey(tester, 'auto_read_scroll_current_page'),
+        closeTo(-200.0, 2.0),
       );
 
       // Speed up live to 8s/page -> progress stays at 0.25; remaining 0.75 * 8s = 6s.
       await tester.pumpWidget(
         _wrapOverlay(
           state: const AutoReadState(
-            mode: AutoReadMode.curtain,
+            mode: AutoReadMode.scroll,
             status: AutoReadStatus.running,
-            curtainSeconds: 8,
+            scrollSeconds: 8,
           ),
           canGoNext: true,
           onAdvancePage: () async {
@@ -336,8 +387,8 @@ void main() {
       );
 
       expect(
-        _clipRectForKey(tester, 'auto_read_curtain_next_clip').height,
-        closeTo(200.0, 2.0),
+        _translationYForKey(tester, 'auto_read_scroll_current_page'),
+        closeTo(-200.0, 2.0),
       );
 
       await tester.pump(const Duration(seconds: 5));
@@ -356,9 +407,9 @@ void main() {
       await tester.pumpWidget(
         _wrapOverlay(
           state: const AutoReadState(
-            mode: AutoReadMode.curtain,
+            mode: AutoReadMode.scroll,
             status: AutoReadStatus.running,
-            curtainSeconds: 10,
+            scrollSeconds: 10,
             turnSeconds: 6,
           ),
           canGoNext: true,
@@ -371,17 +422,17 @@ void main() {
 
       await tester.pump(const Duration(seconds: 5));
       expect(
-        find.byKey(const ValueKey<String>('auto_read_curtain_scan_line')),
+        find.byKey(const ValueKey<String>('auto_read_scroll_page_seam')),
         findsOneWidget,
       );
 
-      // Switch to timedTurn -> curtain disappears, 2.5px bar starts from 0 over 6s.
+      // Switch to timedTurn -> scroll layer disappears, 2.5px bar starts from 0 over 6s.
       await tester.pumpWidget(
         _wrapOverlay(
           state: const AutoReadState(
             mode: AutoReadMode.timedTurn,
             status: AutoReadStatus.running,
-            curtainSeconds: 10,
+            scrollSeconds: 10,
             turnSeconds: 6,
           ),
           canGoNext: true,
@@ -393,7 +444,7 @@ void main() {
       );
 
       expect(
-        find.byKey(const ValueKey<String>('auto_read_curtain_scan_line')),
+        find.byKey(const ValueKey<String>('auto_read_scroll_page_seam')),
         findsNothing,
       );
       final barFinder = find.byKey(
@@ -426,9 +477,9 @@ void main() {
       await tester.pumpWidget(
         _wrapOverlay(
           state: const AutoReadState(
-            mode: AutoReadMode.curtain,
+            mode: AutoReadMode.scroll,
             status: AutoReadStatus.running,
-            curtainSeconds: 6,
+            scrollSeconds: 6,
           ),
           canGoNext: false,
           onAdvancePage: () async {
@@ -460,7 +511,7 @@ void main() {
       );
 
       expect(
-        find.byKey(const ValueKey<String>('auto_read_curtain_scan_line')),
+        find.byKey(const ValueKey<String>('auto_read_scroll_page_seam')),
         findsNothing,
       );
       expect(
@@ -480,9 +531,9 @@ void main() {
       addTearDown(tester.view.reset);
 
       var state = const AutoReadState(
-        mode: AutoReadMode.curtain,
+        mode: AutoReadMode.scroll,
         status: AutoReadStatus.running,
-        curtainSeconds: 18,
+        scrollSeconds: 18,
         turnSeconds: 12,
         showControls: true,
       );
@@ -507,8 +558,8 @@ void main() {
                     onModeChanged: (mode) => setState(() {
                       state = state.copyWith(mode: mode);
                     }),
-                    onCurtainSecondsChanged: (seconds) => setState(() {
-                      state = state.copyWith(curtainSeconds: seconds);
+                    onScrollSecondsChanged: (seconds) => setState(() {
+                      state = state.copyWith(scrollSeconds: seconds);
                     }),
                     onTurnSecondsChanged: (seconds) => setState(() {
                       state = state.copyWith(turnSeconds: seconds);
@@ -524,7 +575,7 @@ void main() {
 
       expect(tester.takeException(), isNull);
       expect(find.text('18s/页'), findsOneWidget);
-      expect(find.text('滚幕覆盖'), findsOneWidget);
+      expect(find.text('平滑滚屏'), findsOneWidget);
       expect(find.text('定时翻页'), findsOneWidget);
       expect(find.text('停止'), findsOneWidget);
       expect(find.byIcon(Icons.pause_rounded), findsOneWidget);
@@ -532,12 +583,12 @@ void main() {
       // Stepper + / -
       await tester.tap(find.byIcon(Icons.add_rounded));
       await tester.pump();
-      expect(state.curtainSeconds, 19);
+      expect(state.scrollSeconds, 19);
       expect(find.text('19s/页'), findsOneWidget);
 
       await tester.tap(find.byIcon(Icons.remove_rounded));
       await tester.pump();
-      expect(state.curtainSeconds, 18);
+      expect(state.scrollSeconds, 18);
 
       // Pause toggle
       await tester.tap(find.byIcon(Icons.pause_rounded));
@@ -577,7 +628,7 @@ void main() {
               ),
               onTogglePause: () {},
               onModeChanged: (_) {},
-              onCurtainSecondsChanged: (_) {},
+              onScrollSecondsChanged: (_) {},
               onTurnSecondsChanged: (_) {},
               onStop: () {},
             ),
@@ -600,7 +651,7 @@ void main() {
               ),
               onTogglePause: () {},
               onModeChanged: (_) {},
-              onCurtainSecondsChanged: (_) {},
+              onScrollSecondsChanged: (_) {},
               onTurnSecondsChanged: (_) {},
               onStop: () {},
             ),

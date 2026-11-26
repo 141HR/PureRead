@@ -6,9 +6,10 @@ import 'package:flutter/material.dart';
 import '../../application/reader/auto_read_state.dart';
 
 /// Dual-mode Auto-Read canvas overlay supporting:
-/// - [AutoReadMode.curtain]: sweeps `nextPageChild` from top to bottom over
-///   `currentPageChild` with a crisp accent scan-line divider and soft drop
-///   shadow, compatible with both single-column and dual-column layouts.
+/// - [AutoReadMode.scroll]: smoothly translates `currentPageChild` upward and
+///   brings `nextPageChild` in continuously from the bottom (like continuous
+///   scroll page-turn), supporting vertical drag scrubbing and natural 0.5px
+///   page-seam separation across single-column and dual-column layouts.
 /// - [AutoReadMode.timedTurn]: displays `currentPageChild` unobstructed with a
 ///   thin 2.5px bottom progress bar and turns pages automatically on completion.
 class ReaderAutoReadOverlay extends StatefulWidget {
@@ -23,6 +24,7 @@ class ReaderAutoReadOverlay extends StatefulWidget {
     required this.onAdvancePage,
     required this.onToggleControls,
     this.onReachedBookEnd,
+    this.pageKey,
   });
 
   final Widget currentPageChild;
@@ -34,6 +36,7 @@ class ReaderAutoReadOverlay extends StatefulWidget {
   final Future<void> Function() onAdvancePage;
   final VoidCallback onToggleControls;
   final VoidCallback? onReachedBookEnd;
+  final Object? pageKey;
 
   @override
   State<ReaderAutoReadOverlay> createState() => _ReaderAutoReadOverlayState();
@@ -43,6 +46,7 @@ class _ReaderAutoReadOverlayState extends State<ReaderAutoReadOverlay>
     with SingleTickerProviderStateMixin {
   late final AnimationController _controller;
   bool _isAdvancing = false;
+  bool _isDraggingScroll = false;
   int _epoch = 0;
 
   @override
@@ -67,11 +71,13 @@ class _ReaderAutoReadOverlayState extends State<ReaderAutoReadOverlay>
     final modeChanged = oldState.mode != newState.mode;
     final durationChanged = oldState.activeDuration != newState.activeDuration;
     final statusChanged = oldState.status != newState.status;
+    final pageKeyChanged = oldWidget.pageKey != widget.pageKey;
 
     if (!newState.isActive) {
       if (oldState.isActive) {
         _epoch++;
         _isAdvancing = false;
+        _isDraggingScroll = false;
         _controller.stop();
         _controller.value = 0.0;
       }
@@ -82,8 +88,22 @@ class _ReaderAutoReadOverlayState extends State<ReaderAutoReadOverlay>
     if (modeChanged || oldState.status == AutoReadStatus.idle) {
       _epoch++;
       _isAdvancing = false;
+      _isDraggingScroll = false;
       _controller.stop();
       _controller.duration = newState.activeDuration;
+      _controller.value = 0.0;
+      if (newState.isRunning) {
+        unawaited(_controller.forward(from: 0.0));
+      }
+      return;
+    }
+
+    if (pageKeyChanged &&
+        newState.isActive &&
+        !_isAdvancing &&
+        !_isDraggingScroll &&
+        _controller.value > 0.05) {
+      _controller.stop();
       _controller.value = 0.0;
       if (newState.isRunning) {
         unawaited(_controller.forward(from: 0.0));
@@ -94,7 +114,7 @@ class _ReaderAutoReadOverlayState extends State<ReaderAutoReadOverlay>
     if (durationChanged) {
       final preservedProgress = _controller.value.clamp(0.0, 1.0);
       _controller.duration = newState.activeDuration;
-      if (newState.isRunning && !_isAdvancing) {
+      if (newState.isRunning && !_isAdvancing && !_isDraggingScroll) {
         _controller.stop(canceled: false);
         if (preservedProgress >= 1.0) {
           unawaited(_handleSweepCompleted());
@@ -110,7 +130,7 @@ class _ReaderAutoReadOverlayState extends State<ReaderAutoReadOverlay>
     if (statusChanged) {
       if (newState.isPaused) {
         _controller.stop(canceled: false);
-      } else if (newState.isRunning) {
+      } else if (newState.isRunning && !_isDraggingScroll) {
         final current = _controller.value.clamp(0.0, 1.0);
         if (!_isAdvancing) {
           if (current >= 1.0) {
@@ -124,6 +144,7 @@ class _ReaderAutoReadOverlayState extends State<ReaderAutoReadOverlay>
         !oldWidget.canGoNext &&
         widget.canGoNext &&
         !_isAdvancing &&
+        !_isDraggingScroll &&
         _controller.isCompleted) {
       unawaited(_controller.forward(from: 0.0));
     }
@@ -138,7 +159,7 @@ class _ReaderAutoReadOverlayState extends State<ReaderAutoReadOverlay>
   }
 
   void _handleAnimationStatus(AnimationStatus status) {
-    if (status == AnimationStatus.completed) {
+    if (status == AnimationStatus.completed && !_isDraggingScroll) {
       unawaited(_handleSweepCompleted());
     }
   }
@@ -162,8 +183,33 @@ class _ReaderAutoReadOverlayState extends State<ReaderAutoReadOverlay>
 
     if (!mounted || epoch != _epoch) return;
     _controller.value = 0.0;
-    if (widget.state.isRunning) {
+    if (widget.state.isRunning && !_isDraggingScroll) {
       unawaited(_controller.forward(from: 0.0));
+    }
+  }
+
+  void _onScrollDragStart(DragStartDetails details) {
+    _isDraggingScroll = true;
+    _controller.stop(canceled: false);
+  }
+
+  void _onScrollDragUpdate(DragUpdateDetails details, double viewportHeight) {
+    if (!_isDraggingScroll || viewportHeight <= 0.0) return;
+    final nextValue =
+        (_controller.value - details.delta.dy / viewportHeight).clamp(0.0, 1.0);
+    _controller.value = nextValue;
+  }
+
+  void _onScrollDragEnd() {
+    if (!_isDraggingScroll) return;
+    _isDraggingScroll = false;
+    if (!mounted || _isAdvancing || !widget.state.isRunning) return;
+
+    final current = _controller.value.clamp(0.0, 1.0);
+    if (current >= 1.0) {
+      unawaited(_handleSweepCompleted());
+    } else {
+      unawaited(_controller.forward(from: current));
     }
   }
 
@@ -216,156 +262,61 @@ class _ReaderAutoReadOverlayState extends State<ReaderAutoReadOverlay>
       child: widget.nextPageChild ?? widget.currentPageChild,
     );
 
-    return GestureDetector(
-      behavior: HitTestBehavior.opaque,
-      onTap: widget.onToggleControls,
-      child: AnimatedBuilder(
-        animation: _controller,
-        builder: (context, _) {
-          final progress = _controller.value.clamp(0.0, 1.0);
-          return Stack(
-            fit: StackFit.expand,
-            children: [
-              ClipRect(
-                key: const ValueKey<String>('auto_read_curtain_current_clip'),
-                clipper: _CurtainRegionClipper(
-                  progress: progress,
-                  isTopRegion: false,
-                ),
-                child: currentLayer,
-              ),
-              ClipRect(
-                key: const ValueKey<String>('auto_read_curtain_next_clip'),
-                clipper: _CurtainRegionClipper(
-                  progress: progress,
-                  isTopRegion: true,
-                ),
-                child: nextLayer,
-              ),
-              CustomPaint(
-                key: const ValueKey<String>('auto_read_curtain_scan_line'),
-                size: Size.infinite,
-                painter: _CurtainScanLinePainter(
-                  progress: progress,
-                  accentColor: widget.accentColor,
-                  dividerColor: widget.dividerColor,
-                ),
-              ),
-            ],
-          );
-        },
-      ),
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        final height = math.max(1.0, constraints.maxHeight);
+        return GestureDetector(
+          behavior: HitTestBehavior.opaque,
+          onTap: widget.onToggleControls,
+          onVerticalDragStart: _onScrollDragStart,
+          onVerticalDragUpdate: (details) =>
+              _onScrollDragUpdate(details, height),
+          onVerticalDragEnd: (_) => _onScrollDragEnd(),
+          onVerticalDragCancel: _onScrollDragEnd,
+          child: ClipRect(
+            child: AnimatedBuilder(
+              animation: _controller,
+              builder: (context, _) {
+                final progress = _controller.value.clamp(0.0, 1.0);
+                final offsetY = progress * height;
+                return Stack(
+                  fit: StackFit.expand,
+                  children: [
+                    Transform.translate(
+                      key: const ValueKey<String>(
+                        'auto_read_scroll_current_page',
+                      ),
+                      offset: Offset(0.0, -offsetY),
+                      child: SizedBox.expand(child: currentLayer),
+                    ),
+                    Transform.translate(
+                      key: const ValueKey<String>(
+                        'auto_read_scroll_next_page',
+                      ),
+                      offset: Offset(0.0, height - offsetY),
+                      child: SizedBox.expand(child: nextLayer),
+                    ),
+                    Positioned(
+                      left: 0,
+                      right: 0,
+                      top: height - offsetY,
+                      height: 0.5,
+                      child: IgnorePointer(
+                        child: ColoredBox(
+                          key: const ValueKey<String>(
+                            'auto_read_scroll_page_seam',
+                          ),
+                          color: widget.dividerColor.withAlpha(72),
+                        ),
+                      ),
+                    ),
+                  ],
+                );
+              },
+            ),
+          ),
+        );
+      },
     );
-  }
-}
-
-class _CurtainRegionClipper extends CustomClipper<Rect> {
-  const _CurtainRegionClipper({
-    required this.progress,
-    required this.isTopRegion,
-  });
-
-  final double progress;
-  final bool isTopRegion;
-
-  @override
-  Rect getClip(Size size) {
-    if (!size.width.isFinite ||
-        !size.height.isFinite ||
-        size.width <= 0.0 ||
-        size.height <= 0.0) {
-      return Rect.zero;
-    }
-    final clamped = progress.clamp(0.0, 1.0);
-    final y = clamped * size.height;
-    if (isTopRegion) {
-      return Rect.fromLTWH(0.0, 0.0, size.width, y);
-    }
-    return Rect.fromLTWH(0.0, y, size.width, math.max(0.0, size.height - y));
-  }
-
-  @override
-  bool shouldReclip(covariant _CurtainRegionClipper oldClipper) {
-    return oldClipper.progress != progress ||
-        oldClipper.isTopRegion != isTopRegion;
-  }
-}
-
-class _CurtainScanLinePainter extends CustomPainter {
-  const _CurtainScanLinePainter({
-    required this.progress,
-    required this.accentColor,
-    required this.dividerColor,
-  });
-
-  final double progress;
-  final Color accentColor;
-  final Color dividerColor;
-
-  static const double _hairlineThickness = 1.5;
-  static const double _shadowHeight = 14.0;
-
-  @override
-  void paint(Canvas canvas, Size size) {
-    if (!size.width.isFinite ||
-        !size.height.isFinite ||
-        size.width <= 0.0 ||
-        size.height <= 0.0) {
-      return;
-    }
-
-    final clamped = progress.clamp(0.0, 1.0);
-    final y = clamped * size.height;
-    final bounds = Offset.zero & size;
-
-    canvas.save();
-    canvas.clipRect(bounds);
-
-    final shadowRect = Rect.fromLTWH(0.0, y, size.width, _shadowHeight);
-    final shadowPaint = Paint()
-      ..shader = LinearGradient(
-        begin: Alignment.topCenter,
-        end: Alignment.bottomCenter,
-        colors: <Color>[
-          Color.lerp(dividerColor, accentColor, 0.30)!.withAlpha(72),
-          accentColor.withAlpha(24),
-          Colors.transparent,
-        ],
-        stops: const <double>[0.0, 0.35, 1.0],
-      ).createShader(shadowRect);
-    canvas.drawRect(shadowRect, shadowPaint);
-
-    const halfStroke = _hairlineThickness * 0.5;
-    final lineY = y
-        .clamp(halfStroke, math.max(halfStroke, size.height - halfStroke))
-        .toDouble();
-    if (lineY >= 1.5) {
-      final rimPaint = Paint()
-        ..color = dividerColor.withAlpha(110)
-        ..strokeWidth = 0.75;
-      canvas.drawLine(
-        Offset(0.0, lineY - 1.0),
-        Offset(size.width, lineY - 1.0),
-        rimPaint,
-      );
-    }
-
-    final hairlinePaint = Paint()
-      ..color = accentColor
-      ..strokeWidth = _hairlineThickness;
-    canvas.drawLine(
-      Offset(0.0, lineY),
-      Offset(size.width, lineY),
-      hairlinePaint,
-    );
-
-    canvas.restore();
-  }
-
-  @override
-  bool shouldRepaint(covariant _CurtainScanLinePainter oldDelegate) {
-    return oldDelegate.progress != progress ||
-        oldDelegate.accentColor != accentColor ||
-        oldDelegate.dividerColor != dividerColor;
   }
 }

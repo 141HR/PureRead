@@ -73,9 +73,9 @@ void main() {
       addTearDown(container.dispose);
 
       final state = container.read(autoReadControllerProvider);
-      expect(state.mode, AutoReadMode.curtain);
+      expect(state.mode, AutoReadMode.scroll);
       expect(state.status, AutoReadStatus.idle);
-      expect(state.curtainSeconds, 18);
+      expect(state.scrollSeconds, 18);
       expect(state.turnSeconds, 12);
       expect(state.showControls, isTrue);
       expect(state.isActive, isFalse);
@@ -84,16 +84,16 @@ void main() {
       expect(state.activeDuration, const Duration(seconds: 18));
     });
 
-    test('loads persisted settings and clamps invalid or out-of-range values', () async {
+    test('loads persisted settings, migrates legacy curtain settings, and clamps out-of-range values', () async {
       final now = DateTime.utc(2026, 11, 25);
       themeRepo.settings['auto_read_mode'] = AppSetting(
         key: 'auto_read_mode',
-        value: 'timedTurn',
+        value: 'curtain',
         updatedAt: now,
       );
       themeRepo.settings['auto_read_curtain_seconds'] = AppSetting(
         key: 'auto_read_curtain_seconds',
-        value: '99',
+        value: '25',
         updatedAt: now,
       );
       themeRepo.settings['auto_read_turn_seconds'] = AppSetting(
@@ -109,9 +109,25 @@ void main() {
       await controller.loadSettings();
 
       var state = container.read(autoReadControllerProvider);
-      expect(state.mode, AutoReadMode.timedTurn);
-      expect(state.curtainSeconds, 60);
+      expect(state.mode, AutoReadMode.scroll);
+      expect(state.scrollSeconds, 25);
       expect(state.turnSeconds, 3);
+
+      themeRepo.settings['auto_read_mode'] = AppSetting(
+        key: 'auto_read_mode',
+        value: 'timedTurn',
+        updatedAt: now,
+      );
+      themeRepo.settings['auto_read_scroll_seconds'] = AppSetting(
+        key: 'auto_read_scroll_seconds',
+        value: '99',
+        updatedAt: now,
+      );
+      await controller.loadSettings();
+
+      state = container.read(autoReadControllerProvider);
+      expect(state.mode, AutoReadMode.timedTurn);
+      expect(state.scrollSeconds, 60);
       expect(state.activeDuration, const Duration(seconds: 3));
 
       themeRepo.settings['auto_read_mode'] = AppSetting(
@@ -119,8 +135,8 @@ void main() {
         value: 'invalid_mode',
         updatedAt: now,
       );
-      themeRepo.settings['auto_read_curtain_seconds'] = AppSetting(
-        key: 'auto_read_curtain_seconds',
+      themeRepo.settings['auto_read_scroll_seconds'] = AppSetting(
+        key: 'auto_read_scroll_seconds',
         value: 'not_a_number',
         updatedAt: now,
       );
@@ -128,7 +144,7 @@ void main() {
 
       state = container.read(autoReadControllerProvider);
       expect(state.mode, AutoReadMode.timedTurn);
-      expect(state.curtainSeconds, 60);
+      expect(state.scrollSeconds, 60);
     });
 
     test('manages start, pause, resume, togglePause, stop, and controls visibility', () async {
@@ -151,7 +167,7 @@ void main() {
       expect(state.isActive, isTrue);
       expect(state.isRunning, isTrue);
       expect(state.isPaused, isFalse);
-      expect(state.mode, AutoReadMode.curtain);
+      expect(state.mode, AutoReadMode.scroll);
 
       controller.toggleControls();
       expect(container.read(autoReadControllerProvider).showControls, isFalse);
@@ -193,23 +209,23 @@ void main() {
       final controller1 = container1.read(autoReadControllerProvider.notifier);
 
       await controller1.setMode(AutoReadMode.timedTurn);
-      await controller1.setCurtainSeconds(4); // clamps to 6
+      await controller1.setScrollSeconds(4); // clamps to 6
       await controller1.setTurnSeconds(75); // clamps to 60
 
       var state1 = container1.read(autoReadControllerProvider);
       expect(state1.mode, AutoReadMode.timedTurn);
-      expect(state1.curtainSeconds, 6);
+      expect(state1.scrollSeconds, 6);
       expect(state1.turnSeconds, 60);
       expect(state1.activeDuration, const Duration(seconds: 60));
 
-      await controller1.setCurtainSeconds(24);
+      await controller1.setScrollSeconds(24);
       await controller1.setTurnSeconds(9);
-      await controller1.setMode(AutoReadMode.curtain);
+      await controller1.setMode(AutoReadMode.scroll);
       state1 = container1.read(autoReadControllerProvider);
       expect(state1.activeDuration, const Duration(seconds: 24));
 
-      expect(themeRepo.settings['auto_read_mode']?.value, 'curtain');
-      expect(themeRepo.settings['auto_read_curtain_seconds']?.value, '24');
+      expect(themeRepo.settings['auto_read_mode']?.value, 'scroll');
+      expect(themeRepo.settings['auto_read_scroll_seconds']?.value, '24');
       expect(themeRepo.settings['auto_read_turn_seconds']?.value, '9');
       container1.dispose();
 
@@ -220,8 +236,8 @@ void main() {
           .loadSettings();
 
       final restored = container2.read(autoReadControllerProvider);
-      expect(restored.mode, AutoReadMode.curtain);
-      expect(restored.curtainSeconds, 24);
+      expect(restored.mode, AutoReadMode.scroll);
+      expect(restored.scrollSeconds, 24);
       expect(restored.turnSeconds, 9);
       expect(restored.status, AutoReadStatus.idle);
     });
@@ -230,11 +246,11 @@ void main() {
       final now = DateTime.utc(2026, 11, 25);
       themeRepo.settings['auto_read_mode'] = AppSetting(
         key: 'auto_read_mode',
-        value: 'curtain',
+        value: 'scroll',
         updatedAt: now,
       );
-      themeRepo.settings['auto_read_curtain_seconds'] = AppSetting(
-        key: 'auto_read_curtain_seconds',
+      themeRepo.settings['auto_read_scroll_seconds'] = AppSetting(
+        key: 'auto_read_scroll_seconds',
         value: '30',
         updatedAt: now,
       );
@@ -244,14 +260,14 @@ void main() {
 
       final controller = container.read(autoReadControllerProvider.notifier);
       controller.start(mode: AutoReadMode.timedTurn);
-      await controller.setCurtainSeconds(15);
+      await controller.setScrollSeconds(15);
 
       await Future<void>.delayed(Duration.zero);
 
       final state = container.read(autoReadControllerProvider);
       expect(state.status, AutoReadStatus.running);
       expect(state.mode, AutoReadMode.timedTurn);
-      expect(state.curtainSeconds, 15);
+      expect(state.scrollSeconds, 15);
     });
 
     test('handles repository read/write failures gracefully', () async {
@@ -264,12 +280,12 @@ void main() {
       final controller = container.read(autoReadControllerProvider.notifier);
       await controller.loadSettings();
       await controller.setMode(AutoReadMode.timedTurn);
-      await controller.setCurtainSeconds(22);
+      await controller.setScrollSeconds(22);
       await controller.setTurnSeconds(10);
 
       final state = container.read(autoReadControllerProvider);
       expect(state.mode, AutoReadMode.timedTurn);
-      expect(state.curtainSeconds, 22);
+      expect(state.scrollSeconds, 22);
       expect(state.turnSeconds, 10);
     });
   });

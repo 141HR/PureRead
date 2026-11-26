@@ -699,7 +699,7 @@ void main() {
   );
 
   testWidgets(
-    'v0.5.0 E2E 2: Auto-Read curtain & timedTurn, 360dp narrow overlay without overflow, pause/resume, keepScreenOn, and TTS mutual exclusion',
+    'v0.5.0 E2E 2: Auto-Read smooth scroll & timedTurn, 360dp narrow overlay without overflow, pause/resume, keepScreenOn, and TTS mutual exclusion',
     (tester) async {
       tester.view.devicePixelRatio = 1.0;
       tester.view.physicalSize = const Size(360, 780);
@@ -740,7 +740,7 @@ void main() {
       expect(find.text('设置'), findsOneWidget);
       expect(tester.takeException(), isNull);
 
-      // Start Auto-Read in curtain mode via bottom overlay button.
+      // Start Auto-Read in smooth vertical scroll mode via bottom overlay button.
       await tester.tap(find.text('自动'));
       await _pumpUntil(
         tester,
@@ -751,17 +751,26 @@ void main() {
 
       expect(find.byType(ReaderAutoReadOverlay), findsOneWidget);
       expect(find.byType(ReaderAutoReadBar), findsOneWidget);
+      expect(find.text('平滑滚屏'), findsOneWidget);
       expect(
-        find.byKey(const ValueKey<String>('auto_read_curtain_scan_line')),
+        find.byKey(const ValueKey<String>('auto_read_scroll_current_page')),
+        findsOneWidget,
+      );
+      expect(
+        find.byKey(const ValueKey<String>('auto_read_scroll_next_page')),
+        findsOneWidget,
+      );
+      expect(
+        find.byKey(const ValueKey<String>('auto_read_scroll_page_seam')),
         findsOneWidget,
       );
       expect(harness.platformBridge.keepScreenOnCalls.last, isTrue);
 
-      // Speed up curtain to 6s so full sweep completes promptly.
+      // Speed up smooth scroll to 6s so full page scroll completes promptly.
       await _runWhilePumping(
         tester,
-        container.read(autoReadControllerProvider.notifier).setCurtainSeconds(6),
-        label: 'set-curtain-6s',
+        container.read(autoReadControllerProvider.notifier).setScrollSeconds(6),
+        label: 'set-scroll-6s',
       );
       final startPageIdx = container
           .read(readerSessionControllerProvider(harness.book.id))
@@ -775,7 +784,7 @@ void main() {
                 .read(readerSessionControllerProvider(harness.book.id))
                 .currentPageIndex >
             startPageIdx,
-        label: 'curtain-advanced-page',
+        label: 'scroll-advanced-page',
       );
 
       // Switch to timedTurn mode from ReaderAutoReadBar.

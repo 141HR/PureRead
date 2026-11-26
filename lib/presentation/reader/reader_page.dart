@@ -252,8 +252,8 @@ class _ReaderPageState extends ConsumerState<ReaderPage>
                   onTogglePause: autoReadController.togglePause,
                   onModeChanged: (mode) =>
                       unawaited(autoReadController.setMode(mode)),
-                  onCurtainSecondsChanged: (sec) =>
-                      unawaited(autoReadController.setCurtainSeconds(sec)),
+                  onScrollSecondsChanged: (sec) =>
+                      unawaited(autoReadController.setScrollSeconds(sec)),
                   onTurnSecondsChanged: (sec) =>
                       unawaited(autoReadController.setTurnSeconds(sec)),
                   onStop: autoReadController.stop,

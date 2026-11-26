@@ -10,7 +10,7 @@ class ReaderAutoReadBar extends StatelessWidget {
     required this.state,
     required this.onTogglePause,
     required this.onModeChanged,
-    required this.onCurtainSecondsChanged,
+    required this.onScrollSecondsChanged,
     required this.onTurnSecondsChanged,
     required this.onStop,
     this.backgroundColor,
@@ -22,7 +22,7 @@ class ReaderAutoReadBar extends StatelessWidget {
   final AutoReadState state;
   final VoidCallback onTogglePause;
   final ValueChanged<AutoReadMode> onModeChanged;
-  final ValueChanged<int> onCurtainSecondsChanged;
+  final ValueChanged<int> onScrollSecondsChanged;
   final ValueChanged<int> onTurnSecondsChanged;
   final VoidCallback onStop;
   final Color? backgroundColor;
@@ -31,8 +31,8 @@ class ReaderAutoReadBar extends StatelessWidget {
   final Color? borderColor;
 
   void _updateActiveSeconds(int nextSeconds) {
-    if (state.mode == AutoReadMode.curtain) {
-      onCurtainSecondsChanged(AutoReadState.clampCurtainSeconds(nextSeconds));
+    if (state.mode == AutoReadMode.scroll) {
+      onScrollSecondsChanged(AutoReadState.clampScrollSeconds(nextSeconds));
     } else {
       onTurnSecondsChanged(AutoReadState.clampTurnSeconds(nextSeconds));
     }
@@ -138,9 +138,9 @@ class ReaderAutoReadBar extends StatelessWidget {
                           ),
                           segments: const <ButtonSegment<AutoReadMode>>[
                             ButtonSegment<AutoReadMode>(
-                              value: AutoReadMode.curtain,
+                              value: AutoReadMode.scroll,
                               label: Text(
-                                '滚幕覆盖',
+                                '平滑滚屏',
                                 maxLines: 1,
                                 softWrap: false,
                                 overflow: TextOverflow.ellipsis,

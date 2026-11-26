@@ -7,20 +7,21 @@ import '../core_providers.dart';
 import 'auto_read_state.dart';
 
 const String _kAutoReadModeKey = 'auto_read_mode';
-const String _kAutoReadCurtainSecondsKey = 'auto_read_curtain_seconds';
+const String _kAutoReadScrollSecondsKey = 'auto_read_scroll_seconds';
+const String _kLegacyAutoReadCurtainSecondsKey = 'auto_read_curtain_seconds';
 const String _kAutoReadTurnSecondsKey = 'auto_read_turn_seconds';
 
 final autoReadControllerProvider =
     NotifierProvider<AutoReadController, AutoReadState>(AutoReadController.new);
 
-/// Manages dual-mode Auto-Read playback state (`curtain` vs `timedTurn`),
+/// Manages dual-mode Auto-Read playback state (`scroll` vs `timedTurn`),
 /// control bar visibility, and persistent speed/mode preferences stored via
 /// [themeRepositoryProvider].
 class AutoReadController extends Notifier<AutoReadState> {
   bool _disposed = false;
   bool _initialLoadScheduled = false;
   int _modeRevision = 0;
-  int _curtainRevision = 0;
+  int _scrollRevision = 0;
   int _turnRevision = 0;
 
   bool get _isAlive => !_disposed && ref.mounted;
@@ -30,7 +31,7 @@ class AutoReadController extends Notifier<AutoReadState> {
     _disposed = false;
     _initialLoadScheduled = false;
     _modeRevision = 0;
-    _curtainRevision = 0;
+    _scrollRevision = 0;
     _turnRevision = 0;
 
     ref.onDispose(() {
@@ -48,41 +49,48 @@ class AutoReadController extends Notifier<AutoReadState> {
   }
 
   /// Loads persisted Auto-Read mode and per-mode durations from
-  /// [themeRepositoryProvider], ignoring missing or malformed entries while
-  /// preserving active playback status and concurrent user mutations.
+  /// [themeRepositoryProvider], migrating legacy `'curtain'` preferences to
+  /// [AutoReadMode.scroll] while ignoring malformed entries and preserving
+  /// active playback state.
   Future<void> loadSettings() async {
     if (!_isAlive) return;
     _initialLoadScheduled = true;
 
     final themeRepo = ref.read(themeRepositoryProvider);
     final modeRevBefore = _modeRevision;
-    final curtainRevBefore = _curtainRevision;
+    final scrollRevBefore = _scrollRevision;
     final turnRevBefore = _turnRevision;
 
     AutoReadMode? loadedMode;
-    int? loadedCurtain;
+    int? loadedScroll;
     int? loadedTurn;
 
     try {
       final modeSetting = await themeRepo.getSetting(_kAutoReadModeKey);
       if (!_isAlive) return;
       if (modeSetting != null) {
-        for (final candidate in AutoReadMode.values) {
-          if (candidate.name == modeSetting.value) {
-            loadedMode = candidate;
-            break;
+        if (modeSetting.value == 'curtain') {
+          loadedMode = AutoReadMode.scroll;
+        } else {
+          for (final candidate in AutoReadMode.values) {
+            if (candidate.name == modeSetting.value) {
+              loadedMode = candidate;
+              break;
+            }
           }
         }
       }
 
-      final curtainSetting = await themeRepo.getSetting(
-        _kAutoReadCurtainSecondsKey,
+      var scrollSetting = await themeRepo.getSetting(_kAutoReadScrollSecondsKey);
+      if (!_isAlive) return;
+      scrollSetting ??= await themeRepo.getSetting(
+        _kLegacyAutoReadCurtainSecondsKey,
       );
       if (!_isAlive) return;
-      if (curtainSetting != null) {
-        final parsed = int.tryParse(curtainSetting.value);
+      if (scrollSetting != null) {
+        final parsed = int.tryParse(scrollSetting.value);
         if (parsed != null) {
-          loadedCurtain = AutoReadState.clampCurtainSeconds(parsed);
+          loadedScroll = AutoReadState.clampScrollSeconds(parsed);
         }
       }
 
@@ -102,9 +110,7 @@ class AutoReadController extends Notifier<AutoReadState> {
     if (!_isAlive) return;
     state = state.copyWith(
       mode: _modeRevision == modeRevBefore ? loadedMode : null,
-      curtainSeconds: _curtainRevision == curtainRevBefore
-          ? loadedCurtain
-          : null,
+      scrollSeconds: _scrollRevision == scrollRevBefore ? loadedScroll : null,
       turnSeconds: _turnRevision == turnRevBefore ? loadedTurn : null,
     );
   }
@@ -170,16 +176,16 @@ class AutoReadController extends Notifier<AutoReadState> {
     await _saveSetting(_kAutoReadModeKey, mode.name);
   }
 
-  /// Updates the curtain sweep duration (clamped to `6..60` seconds) and
-  /// persists it.
-  Future<void> setCurtainSeconds(int seconds) async {
+  /// Updates the smooth vertical scroll duration (clamped to `6..60` seconds)
+  /// and persists it.
+  Future<void> setScrollSeconds(int seconds) async {
     if (!_isAlive) return;
-    _curtainRevision++;
-    final clamped = AutoReadState.clampCurtainSeconds(seconds);
-    if (state.curtainSeconds != clamped) {
-      state = state.copyWith(curtainSeconds: clamped);
+    _scrollRevision++;
+    final clamped = AutoReadState.clampScrollSeconds(seconds);
+    if (state.scrollSeconds != clamped) {
+      state = state.copyWith(scrollSeconds: clamped);
     }
-    await _saveSetting(_kAutoReadCurtainSecondsKey, clamped.toString());
+    await _saveSetting(_kAutoReadScrollSecondsKey, clamped.toString());
   }
 
   /// Updates the timed page-turn interval (clamped to `3..60` seconds) and
