@@ -277,7 +277,7 @@ void main() {
 
   group('SettingsPage', () {
     testWidgets(
-      'renders cleanly under default ProviderScope with .pureread.zip disclaimer, theme/font, and GPL-3.0 About',
+      'renders cleanly under default ProviderScope with .pureread.zip disclaimer, theme/font, and MIT About',
       (tester) async {
         tester.view.devicePixelRatio = 1.0;
         tester.view.physicalSize = const Size(400, 800);
@@ -290,7 +290,7 @@ void main() {
 
         expect(find.textContaining('.pureread.zip'), findsOneWidget);
         expect(find.textContaining('不包含：在线章节正文缓存'), findsOneWidget);
-        expect(find.textContaining('GPL-3.0'), findsOneWidget);
+        expect(find.text('MIT License'), findsOneWidget);
         expect(find.textContaining('零遥测'), findsOneWidget);
         expect(find.text('米白护眼'), findsOneWidget);
       },

@@ -13,7 +13,7 @@ String _displayFileName(String rawPath) {
 }
 
 /// Adaptive PureRead settings, local `.pureread.zip` backup/restore, database
-/// snapshot viewer, cache manager, theme/font entry, and GPL-3.0 About page.
+/// snapshot viewer, cache manager, theme/font entry, and MIT About page.
 class SettingsPage extends ConsumerWidget {
   const SettingsPage({super.key});
 
@@ -656,7 +656,7 @@ class _AboutSectionCard extends StatelessWidget {
           const SizedBox(height: 6),
           const _InfoKeyValueRow(
             label: '开源协议',
-            value: 'GPL-3.0 (GNU General Public License v3.0)',
+            value: 'MIT License',
           ),
           const SizedBox(height: 10),
           Text(

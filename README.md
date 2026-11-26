@@ -8,7 +8,7 @@
 
 [![PureRead CI](https://github.com/141HR/PureRead/actions/workflows/ci.yml/badge.svg)](https://github.com/141HR/PureRead/actions/workflows/ci.yml)
 [![Latest Release](https://img.shields.io/github/v/release/141HR/PureRead)](https://github.com/141HR/PureRead/releases/latest)
-[![License: GPL-3.0](https://img.shields.io/github/license/141HR/PureRead)](./LICENSE)
+[![License: MIT](https://img.shields.io/github/license/141HR/PureRead)](./LICENSE)
 ![Platforms](https://img.shields.io/badge/Platforms-Windows%20%7C%20Android-0078D4)
 ![Flutter](https://img.shields.io/badge/Flutter-3.47.7-02569B)
 ![Dart](https://img.shields.io/badge/Dart-3.13.5-0175C2)
@@ -121,4 +121,4 @@ PureRead 是一款纯本地跨端文档阅读与解析工具：
 
 欢迎通过 [Issues](https://github.com/141HR/PureRead/issues) 反馈问题或建议，提交 Pull Request 前请阅读 [CONTRIBUTING.md](./CONTRIBUTING.md) 并遵守 [CODE_OF_CONDUCT.md](./CODE_OF_CONDUCT.md)。
 
-本项目基于 **GNU General Public License v3.0 (GPL-3.0)** 协议开源，详见 [LICENSE](./LICENSE)。
+本项目基于 **MIT License** 协议开源，详见 [LICENSE](./LICENSE)。

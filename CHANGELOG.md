@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- 将项目开源协议由 GPL-3.0 变更为 MIT License。
+
 ## [0.5.0] - 2026-11-26
 
 ### Added
