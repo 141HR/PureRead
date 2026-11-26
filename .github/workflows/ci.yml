@@ -66,7 +66,7 @@ jobs:
           Compress-Archive -Path "build\windows\x64\runner\Release\*" -DestinationPath "dist\pureread-windows-x64.zip" -Force
 
       - name: Upload Windows zip artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: pureread-windows-x64
           path: dist/pureread-windows-x64.zip
@@ -110,7 +110,7 @@ jobs:
           done
 
       - name: Upload Android split APK artifacts
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: pureread-android-apks
           path: |
